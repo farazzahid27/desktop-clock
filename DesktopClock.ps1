@@ -58,7 +58,7 @@ Add-Type -AssemblyName System.Windows.Forms
 # ---- Version and update source --------------------------------------------
 # Raise AppVersion before publishing a new GitHub release with a higher tag
 # (e.g. AppVersion 1.1.0 -> release tag v1.1.0).
-$script:AppVersion = [version]'1.0.1'
+$script:AppVersion = [version]'1.0.2'
 $script:UpdateRepo = 'farazzahid27/desktop-clock'
 
 # ------------------------------------------------------------
@@ -784,6 +784,7 @@ $script:config = @{
     Use24h          = $true
     StartMenu       = $true
     LastUpdateCheck = $null
+    AnimateIcons    = $true
     Positions   = $null   # per layout: @{ Wide = @{...}; Narrow = @{...} }
 }
 
@@ -801,6 +802,21 @@ if (Test-Path $script:settingsFile) {
     }
 }
 
+# Test mode, used only by Test-DesktopClock.ps1: made-up weather instead of
+# Open-Meteo. Normal launches never set this environment variable.
+$script:testWeatherJson = $env:DESKTOPCLOCK_TEST_WEATHER
+$script:testWeather = $null
+if ($script:testWeatherJson) {
+    try {
+        $script:testWeather = ConvertFrom-Json -InputObject $script:testWeatherJson
+        Write-Log "Test mode: $($script:testWeatherJson)"
+    }
+    catch {
+        $script:testWeather = $null
+        Write-Log "Test weather ignored: $($_.Exception.Message)"
+    }
+}
+
 if ($script:config.Show -notin @('Both','Clock','Weather')) { $script:config.Show = 'Both' }
 if ($script:config.BothLayout -notin @('Wide','Narrow')) { $script:config.BothLayout = 'Wide' }
 try { $script:config.ShowSeconds = [bool]$script:config.ShowSeconds } catch { $script:config.ShowSeconds = $true }
@@ -811,6 +827,9 @@ catch { $script:config.StartMenu = $true }
 
 try { $script:config.UpdateChecks = [bool]$script:config.UpdateChecks }
 catch { $script:config.UpdateChecks = $true }
+
+try { $script:config.AnimateIcons = [bool]$script:config.AnimateIcons }
+catch { $script:config.AnimateIcons = $true }
 
 if ($script:config.Theme -notin @('Auto','Light','Dark')) {
     $script:config.Theme = 'Auto'
@@ -915,6 +934,12 @@ $script:failCount = 0
 $script:lastError = $null
 $script:weatherCode = -1
 $script:isDay = 1
+$script:rainRate = $null       # mm per hour
+$script:snowRate = $null       # cm per hour
+$script:windSpeed = $null      # m/s
+$script:humidity = $null       # percent
+$script:windSeconds = 0.0      # current wind-line cycle (0 = still)
+$script:statsColor = [Windows.Media.Colors]::White
 
 $script:city = $null
 $script:startRect = $null
@@ -1054,10 +1079,12 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                                    TextTrimming="CharacterEllipsis"/>
 
                         <!-- Left: temperature over "Feels like".
+                             Middle: wind speed over humidity.
                              Right: icon over condition, centred, right-aligned. -->
                         <Grid x:Name="TemperatureRow" Margin="0,2,0,0">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
@@ -1075,15 +1102,44 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                                            VerticalAlignment="Top" Margin="3,0,0,0"/>
                             </StackPanel>
 
-                            <Viewbox x:Name="WeatherArt" Grid.Column="1"
+                            <!-- Wind speed and humidity, each with a small drawn
+                                 symbol, between the temperature and the icon. -->
+                            <StackPanel x:Name="WeatherStats" Grid.Column="1"
+                                        VerticalAlignment="Center" Margin="8,0,0,0">
+                                <StackPanel Orientation="Horizontal" ToolTip="Wind speed">
+                                    <Viewbox Width="14" Height="14" VerticalAlignment="Center">
+                                        <Canvas Width="16" Height="16">
+                                            <Path x:Name="WindPath" StrokeThickness="1.6"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                                  Data="M 1.5,5.5 L 9.5,5.5 C 11.5,5.5 12.3,3 10.7,2 C 9.6,1.4 8.4,2 8.2,3 M 1.5,9 L 12.5,9 C 14.5,9 15.2,11.5 13.6,12.6 C 12.5,13.2 11.3,12.6 11.1,11.6 M 1.5,12.5 L 7,12.5"/>
+                                        </Canvas>
+                                    </Viewbox>
+                                    <TextBlock x:Name="WindText" Text="--" FontSize="12"
+                                               Margin="4,0,0,0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,3,0,0"
+                                            ToolTip="Relative humidity">
+                                    <Viewbox Width="14" Height="14" VerticalAlignment="Center">
+                                        <Canvas Width="16" Height="16">
+                                            <Path x:Name="HumidityPath" StrokeThickness="1.5"
+                                                  StrokeLineJoin="Round"
+                                                  Data="M 8,1.5 C 8,1.5 3,7.2 3,10.3 C 3,13.1 5.2,15 8,15 C 10.8,15 13,13.1 13,10.3 C 13,7.2 8,1.5 8,1.5 Z"/>
+                                        </Canvas>
+                                    </Viewbox>
+                                    <TextBlock x:Name="HumidityText" Text="--" FontSize="12"
+                                               Margin="4,0,0,0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </StackPanel>
+
+                            <Viewbox x:Name="WeatherArt" Grid.Column="2"
                                      Width="68" Height="58" Margin="12,0,-5,0"
                                      HorizontalAlignment="Center" Stretch="Uniform"/>
 
-                            <TextBlock x:Name="FeelsText" Grid.Row="1"
+                            <TextBlock x:Name="FeelsText" Grid.Row="1" Grid.ColumnSpan="2"
                                        FontSize="14"
                                        Margin="1,0,0,0" VerticalAlignment="Top"/>
 
-                            <TextBlock x:Name="ConditionText" Grid.Row="1" Grid.Column="1"
+                            <TextBlock x:Name="ConditionText" Grid.Row="1" Grid.Column="2"
                                        Text="Weather not loaded"
                                        FontSize="14"
                                        TextAlignment="Center" TextWrapping="Wrap"
@@ -1182,7 +1238,8 @@ $ui = @{}
     'Divider','DateText','TimeText','LocationText','TemperatureText','FeelsText',
     'TempValue','TempUnit','FooterRow','WeekText','TimeRow','TimeSuffix',
     'WeatherArt','ConditionText','UpdatedText','RefreshButton','ControlHotspot',
-    'CornerButtons','SettingsButton','CloseButton','ResizeGrip','TemperatureRow'
+    'CornerButtons','SettingsButton','CloseButton','ResizeGrip','TemperatureRow',
+    'WeatherStats','WindText','HumidityText','WindPath','HumidityPath'
 ) | ForEach-Object { $ui[$_] = $window.FindName($_) }
 
 $script:brushConverter = New-Object Windows.Media.BrushConverter
@@ -1336,17 +1393,33 @@ function Update-UnitAlignment {
 # Stacked layout: the icon takes the room left beside the temperature, so a
 # short reading ("16") gets a big icon and a long one ("-12") a smaller one,
 # keeping a small, even gap. The icon's right edge stays under the seconds.
+# Wind speed and humidity sit between the temperature and the icon; the
+# temperature column also holds "Feels like" in this layout.
 function Update-ArtSize {
     $infinite = [double]::PositiveInfinity
     $ui.TemperatureText.Measure((New-Size $infinite $infinite))
     $temperature = [double]$ui.TemperatureText.DesiredSize.Width
-    $available = $script:stackedWidth - $temperature - 12 + 5
-    $size = [Math]::Max(72.0, [Math]::Min(112.0, [Math]::Floor($available)))
+    $ui.FeelsText.Measure((New-Size $infinite $infinite))
+    $left = [Math]::Max($temperature, [double]$ui.FeelsText.DesiredSize.Width)
+    $ui.WeatherStats.Measure((New-Size $infinite $infinite))
+    $stats = [double]$ui.WeatherStats.DesiredSize.Width
+    $available = $script:stackedWidth - $left - $stats - 12 + 5
+    $size = [Math]::Max(40.0, [Math]::Min(112.0, [Math]::Floor($available)))
     $height = [Math]::Round($size * 0.86)
     if ($ui.WeatherArt.Width -ne $size) {
         $ui.WeatherArt.Width = $size
         $ui.WeatherArt.Height = $height
     }
+
+    # Condition text centred under the icon. If it is wider than the icon it
+    # may extend left (under wind/humidity) but never past the icon's right
+    # edge. The icon sits 12 px into its column and 5 px beyond its end.
+    $ui.ConditionText.Measure((New-Size $infinite $infinite))
+    $text = [double]$ui.ConditionText.DesiredSize.Width -
+        $ui.ConditionText.Margin.Left - $ui.ConditionText.Margin.Right
+    $right = [Math]::Max(-5.0, $size / 2 - 5 - $text / 2)
+    $margin = New-Object Windows.Thickness -ArgumentList 0, 0, $right, 0
+    if ($ui.ConditionText.Margin -ne $margin) { $ui.ConditionText.Margin = $margin }
 }
 
 # Wide layout: the icon is sized from the temperature number, so both have
@@ -1381,7 +1454,26 @@ function Set-WeatherSizing([string]$mode) {
         $ui.TempValue.FontSize = $ui.TimeText.FontSize
         $indent = 10
     }
+    Update-NegativeStyle $mode
     Update-UnitAlignment
+
+    # Wind/humidity column. Stacked (fixed width): the condition text may use
+    # the room under wind/humidity and the icon, so the size never changes.
+    # Wide / weather only: "Feels like" may run under wind/humidity, so the
+    # widget only widens by what the new column really needs.
+    if ($mode -eq 'Narrow') {
+        [Windows.Controls.Grid]::SetColumnSpan($ui.FeelsText, 1)
+        [Windows.Controls.Grid]::SetColumn($ui.ConditionText, 1)
+        [Windows.Controls.Grid]::SetColumnSpan($ui.ConditionText, 2)
+        $ui.ConditionText.HorizontalAlignment = 'Right'   # margin set in Update-ArtSize
+    }
+    else {
+        [Windows.Controls.Grid]::SetColumnSpan($ui.FeelsText, 2)
+        [Windows.Controls.Grid]::SetColumn($ui.ConditionText, 2)
+        [Windows.Controls.Grid]::SetColumnSpan($ui.ConditionText, 1)
+        $ui.ConditionText.HorizontalAlignment = 'Center'
+        $ui.ConditionText.Margin = '12,0,-5,0'
+    }
 
     # Temperature may be indented; "Feels like" always lines up with the city.
     $tempMargin = New-Object Windows.Thickness -ArgumentList $indent, 0, 0, 0
@@ -1391,6 +1483,25 @@ function Set-WeatherSizing([string]$mode) {
 
     if ($mode -eq 'Weather') { Update-WeatherOnlySize }
     elseif ($mode -ne 'Wide') { Update-ArtSize }
+}
+
+# Negative readings: the minus sign at half the size of the digits and
+# centred on them, so "-12" does not crowd out the weather icon. Same in
+# every layout; positive readings show the plain number.
+$script:tempText = '--'
+
+function Update-NegativeStyle([string]$mode) {
+    $text = [string]$script:tempText
+    $ui.TempValue.Text = $text   # also clears an earlier smaller minus sign
+    if (-not $text.StartsWith($script:ch.Minus)) { return }
+
+    $size = [double]$ui.TempValue.FontSize
+    $ui.TempValue.Inlines.Clear()
+    $minus = New-Object Windows.Documents.Run -ArgumentList $script:ch.Minus
+    $minus.FontSize = [Math]::Max(8.0, [Math]::Round($size * 0.5))
+    $minus.BaselineAlignment = [Windows.BaselineAlignment]::Center
+    $ui.TempValue.Inlines.Add($minus)
+    $ui.TempValue.Inlines.Add((New-Object Windows.Documents.Run -ArgumentList $text.Substring(1)))
 }
 
 # Weather only: no clock sets the width, so the card fits the weather
@@ -1680,9 +1791,12 @@ function Get-SunXaml([double]$cx, [double]$cy, [double]$r) {
     $thick = [Math]::Max(1.8, $r * 0.19)
 
 @"
-<Path Data="$($rays.ToString().Trim())" Stroke="#F5A524" StrokeThickness="$(Fmt $thick)"
-      StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-<Ellipse Canvas.Left="$(Fmt ($cx - $r))" Canvas.Top="$(Fmt ($cy - $r))"
+<Canvas Tag="Sun">
+<Path Tag="Spin" Data="$($rays.ToString().Trim())" Stroke="#F5A524" StrokeThickness="$(Fmt $thick)"
+      StrokeStartLineCap="Round" StrokeEndLineCap="Round">
+  <Path.RenderTransform><RotateTransform CenterX="$(Fmt $cx)" CenterY="$(Fmt $cy)"/></Path.RenderTransform>
+</Path>
+<Ellipse Tag="Pulse" Canvas.Left="$(Fmt ($cx - $r))" Canvas.Top="$(Fmt ($cy - $r))"
          Width="$(Fmt $d)" Height="$(Fmt $d)" Stroke="#EE9D16" StrokeThickness="0.8">
   <Ellipse.Fill>
     <RadialGradientBrush GradientOrigin="0.35,0.3" Center="0.42,0.38" RadiusX="0.68" RadiusY="0.68">
@@ -1691,7 +1805,9 @@ function Get-SunXaml([double]$cx, [double]$cy, [double]$r) {
       <GradientStop Color="#F7A928" Offset="1"/>
     </RadialGradientBrush>
   </Ellipse.Fill>
+  <Ellipse.RenderTransform><ScaleTransform CenterX="$(Fmt $r)" CenterY="$(Fmt $r)"/></Ellipse.RenderTransform>
 </Ellipse>
+</Canvas>
 "@
 }
 
@@ -1701,7 +1817,8 @@ function Get-MoonXaml([double]$cx, [double]$cy, [double]$r) {
     $or = $r * 0.84
 
 @"
-<Path Stroke="#9C8FE0" StrokeThickness="0.6">
+<Path Tag="Rock" Stroke="#9C8FE0" StrokeThickness="0.6">
+  <Path.RenderTransform><RotateTransform CenterX="$(Fmt $cx)" CenterY="$(Fmt $cy)"/></Path.RenderTransform>
   <Path.Fill>
     <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
       <GradientStop Color="#F4F1FF" Offset="0"/>
@@ -1719,9 +1836,9 @@ function Get-MoonXaml([double]$cx, [double]$cy, [double]$r) {
     </CombinedGeometry>
   </Path.Data>
 </Path>
-<Ellipse Canvas.Left="$(Fmt ($cx + $r * 0.85))" Canvas.Top="$(Fmt ($cy - $r * 1.05))"
+<Ellipse Tag="Twinkle" Canvas.Left="$(Fmt ($cx + $r * 0.85))" Canvas.Top="$(Fmt ($cy - $r * 1.05))"
          Width="2.6" Height="2.6" Fill="#E8E2FF"/>
-<Ellipse Canvas.Left="$(Fmt ($cx + $r * 1.3))" Canvas.Top="$(Fmt ($cy - $r * 0.3))"
+<Ellipse Tag="Twinkle" Canvas.Left="$(Fmt ($cx + $r * 1.3))" Canvas.Top="$(Fmt ($cy - $r * 0.3))"
          Width="1.8" Height="1.8" Fill="#E8E2FF"/>
 "@
 }
@@ -1739,7 +1856,7 @@ function Get-CloudXaml([double]$left, [double]$top, [double]$scale, [string]$ton
     }
 
 @"
-<Path Data="M 14,34 C 5.5,34 0,28 2.5,21 C 4.5,15.5 10,13 15.5,14 C 17.5,6 25,0.5 33.5,1.5 C 41.5,2.5 46.5,8 47.5,14.5 C 54.5,13.5 60.5,18.5 60,25.5 C 59.5,31 55,34 48.5,34 Z"
+<Path Tag="Drift" Data="M 14,34 C 5.5,34 0,28 2.5,21 C 4.5,15.5 10,13 15.5,14 C 17.5,6 25,0.5 33.5,1.5 C 41.5,2.5 46.5,8 47.5,14.5 C 54.5,13.5 60.5,18.5 60,25.5 C 59.5,31 55,34 48.5,34 Z"
       Stroke="$edge" StrokeThickness="0.9">
   <Path.Fill>
     <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
@@ -1757,40 +1874,102 @@ function Get-CloudXaml([double]$left, [double]$top, [double]$scale, [string]$ton
 "@
 }
 
+# One path per drop, so drops can fall one after another. $seconds is the
+# fall time, stored in the Tag for the animation.
 function Get-RainXaml([double]$x0, [double]$y0, [int]$count, [double]$gap,
-                      [double]$length, [double]$thick, [string]$color) {
-    $data = New-Object Text.StringBuilder
+                      [double]$length, [double]$thick, [string]$color, [double]$seconds) {
+    $out = New-Object Text.StringBuilder
     for ($i = 0; $i -lt $count; $i++) {
         $x = $x0 + $i * $gap
         $y = $y0 + ($i % 2) * 3
-        [void]$data.Append("M $(Fmt $x),$(Fmt $y) L $(Fmt ($x - $length * 0.35)),$(Fmt ($y + $length)) ")
+        $data = "M $(Fmt $x),$(Fmt $y) L $(Fmt ($x - $length * 0.35)),$(Fmt ($y + $length))"
+        [void]$out.Append("<Path Tag=`"Rain:$(Fmt $seconds)`" Data=`"$data`" Stroke=`"$color`" StrokeThickness=`"$(Fmt $thick)`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>")
     }
-    "<Path Data=`"$($data.ToString().Trim())`" Stroke=`"$color`" StrokeThickness=`"$(Fmt $thick)`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>"
+    $out.ToString()
 }
 
 # $points: flat list x1,y1,x2,y2,...
-function Get-SnowXaml([double[]]$points) {
-    $data = New-Object Text.StringBuilder
+# Flurries: small, simple three-line flakes that sway as they drift down.
+function Get-FlurryXaml([double[]]$points, [double]$seconds) {
+    $out = New-Object Text.StringBuilder
     for ($i = 0; $i + 1 -lt $points.Count; $i += 2) {
         $x = $points[$i]; $y = $points[$i + 1]
-        [void]$data.Append("M $(Fmt ($x - 4)),$(Fmt $y) L $(Fmt ($x + 4)),$(Fmt $y) ")
-        [void]$data.Append("M $(Fmt ($x - 2)),$(Fmt ($y - 3.46)) L $(Fmt ($x + 2)),$(Fmt ($y + 3.46)) ")
-        [void]$data.Append("M $(Fmt ($x - 2)),$(Fmt ($y + 3.46)) L $(Fmt ($x + 2)),$(Fmt ($y - 3.46)) ")
+        $data = New-Object Text.StringBuilder
+        for ($k = 0; $k -lt 3; $k++) {
+            $a = $k * [Math]::PI / 3
+            $c = [Math]::Cos($a) * 2.6; $s = [Math]::Sin($a) * 2.6
+            [void]$data.Append("M $(Fmt ($x - $c)),$(Fmt ($y - $s)) L $(Fmt ($x + $c)),$(Fmt ($y + $s)) ")
+        }
+        [void]$out.Append("<Path Tag=`"Flurry:$(Fmt $seconds)`" Data=`"$($data.ToString().Trim())`" Stroke=`"#5FBDEF`" StrokeThickness=`"1.3`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>")
     }
-    "<Path Data=`"$($data.ToString().Trim())`" Stroke=`"#5FBDEF`" StrokeThickness=`"1.5`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>"
+    $out.ToString()
+}
+
+# Snowflakes: six arms with a small branch on each, turning slowly as they
+# fall. Tag holds fall time, turn time and fall distance.
+function Get-FlakeXaml([double[]]$points, [double]$size, [double]$fall, [double]$spin, [double]$dy) {
+    $out = New-Object Text.StringBuilder
+    for ($i = 0; $i + 1 -lt $points.Count; $i += 2) {
+        $x = $points[$i]; $y = $points[$i + 1]
+        $data = New-Object Text.StringBuilder
+        for ($k = 0; $k -lt 6; $k++) {
+            $a = $k * [Math]::PI / 3
+            $ex = $x + [Math]::Cos($a) * $size; $ey = $y + [Math]::Sin($a) * $size
+            [void]$data.Append("M $(Fmt $x),$(Fmt $y) L $(Fmt $ex),$(Fmt $ey) ")
+            $bx = $x + [Math]::Cos($a) * $size * 0.58; $by = $y + [Math]::Sin($a) * $size * 0.58
+            foreach ($o in @(-0.7, 0.7)) {
+                $tx = $bx + [Math]::Cos($a + $o) * $size * 0.38
+                $ty = $by + [Math]::Sin($a + $o) * $size * 0.38
+                [void]$data.Append("M $(Fmt $bx),$(Fmt $by) L $(Fmt $tx),$(Fmt $ty) ")
+            }
+        }
+        $tag = "Flake:$(Fmt $fall):$(Fmt $spin):$(Fmt $dy)"
+        [void]$out.Append("<Path Tag=`"$tag`" Data=`"$($data.ToString().Trim())`" Stroke=`"#5FBDEF`" StrokeThickness=`"1.2`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>")
+    }
+    $out.ToString()
+}
+
+# Snow grains: tiny round grains that drop quickly and do not turn.
+function Get-GrainXaml([double[]]$points, [double]$seconds) {
+    $out = New-Object Text.StringBuilder
+    for ($i = 0; $i + 1 -lt $points.Count; $i += 2) {
+        [void]$out.Append("<Ellipse Tag=`"Grain:$(Fmt $seconds)`" Canvas.Left=`"$(Fmt ($points[$i] - 1.2))`" Canvas.Top=`"$(Fmt ($points[$i + 1] - 1.2))`" Width=`"2.4`" Height=`"2.4`" Fill=`"#EAF6FF`" Stroke=`"#5FBDEF`" StrokeThickness=`"0.7`"/>")
+    }
+    $out.ToString()
+}
+
+# Ice pellets for freezing drizzle and freezing rain.
+function Get-PelletXaml([double[]]$points) {
+    $out = New-Object Text.StringBuilder
+    for ($i = 0; $i + 1 -lt $points.Count; $i += 2) {
+        [void]$out.Append("<Ellipse Tag=`"Pellet`" Canvas.Left=`"$(Fmt ($points[$i] - 1.9))`" Canvas.Top=`"$(Fmt ($points[$i + 1] - 1.9))`" Width=`"3.8`" Height=`"3.8`" Fill=`"#F2FBFF`" Stroke=`"#74C2EC`" StrokeThickness=`"0.9`"/>")
+    }
+    $out.ToString()
+}
+
+# Snow by intensity: 1 flurries, 2 snow, 3 heavy snow (larger, more, faster).
+function Get-SnowArt([int]$level, [double]$shift) {
+    if ($level -le 1) {
+        return Get-FlurryXaml @(24, (52 + $shift), 42, (56 + $shift)) 4.2
+    }
+    if ($level -eq 2) {
+        return Get-FlakeXaml @(18, (51 + $shift), 32, (55 + $shift), 46, (51 + $shift)) 3.8 2.8 7 6
+    }
+    return Get-FlakeXaml @(14, (50 + $shift), 24, (54 + $shift), 34, (50 + $shift),
+        44, (54 + $shift), 54, (50 + $shift)) 4.6 1.9 5 6
 }
 
 function Get-HailXaml([double[]]$points) {
     $out = New-Object Text.StringBuilder
     for ($i = 0; $i + 1 -lt $points.Count; $i += 2) {
-        [void]$out.Append("<Ellipse Canvas.Left=`"$(Fmt ($points[$i] - 2.4))`" Canvas.Top=`"$(Fmt ($points[$i + 1] - 2.4))`" Width=`"4.8`" Height=`"4.8`" Fill=`"#D3EEFB`" Stroke=`"#74C2EC`" StrokeThickness=`"0.8`"/>")
+        [void]$out.Append("<Ellipse Tag=`"Hail`" Canvas.Left=`"$(Fmt ($points[$i] - 2.4))`" Canvas.Top=`"$(Fmt ($points[$i + 1] - 2.4))`" Width=`"4.8`" Height=`"4.8`" Fill=`"#D3EEFB`" Stroke=`"#74C2EC`" StrokeThickness=`"0.8`"/>")
     }
     $out.ToString()
 }
 
 function Get-BoltXaml([double]$x, [double]$y) {
 @"
-<Path Data="M 6,0 L -4,15 L 3,15 L -1,28 L 12,10 L 5,10 L 10,0 Z" Stroke="#D98300" StrokeThickness="0.6">
+<Path Tag="Flash" Data="M 6,0 L -4,15 L 3,15 L -1,28 L 12,10 L 5,10 L 10,0 Z" Stroke="#D98300" StrokeThickness="0.6">
   <Path.Fill>
     <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
       <GradientStop Color="#FFE77E" Offset="0"/>
@@ -1803,8 +1982,252 @@ function Get-BoltXaml([double]$x, [double]$y) {
 }
 
 function Get-FogXaml([double]$y) {
-    $data = "M 12,$(Fmt $y) L 58,$(Fmt $y) M 18,$(Fmt ($y + 6)) L 64,$(Fmt ($y + 6)) M 10,$(Fmt ($y + 12)) L 48,$(Fmt ($y + 12))"
-    "<Path Data=`"$data`" Stroke=`"#A1B0C2`" StrokeThickness=`"2.8`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>"
+    $out = New-Object Text.StringBuilder
+    foreach ($line in @(@(12, $y, 58), @(18, ($y + 6), 64), @(10, ($y + 12), 48))) {
+        $data = "M $(Fmt $line[0]),$(Fmt $line[1]) L $(Fmt $line[2]),$(Fmt $line[1])"
+        [void]$out.Append("<Path Tag=`"Fog`" Data=`"$data`" Stroke=`"#A1B0C2`" StrokeThickness=`"2.8`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>")
+    }
+    $out.ToString()
+}
+
+# Rain and snow intensity: 1 light, 2 moderate, 3 heavy. Uses the amount
+# Open-Meteo reports (rain mm/h, snow cm/h); when that is missing or 0,
+# the intensity in the weather code decides.
+function Get-Intensity([int]$code) {
+    $rain = $script:rainRate
+    $snow = $script:snowRate
+
+    if ($code -in @(71,73,75,85,86)) {
+        if ($null -ne $snow -and $snow -gt 0) {
+            if ($snow -lt 0.5) { return 1 }
+            if ($snow -lt 4) { return 2 }
+            return 3
+        }
+        if ($code -in @(71,85)) { return 1 }
+        if ($code -eq 73) { return 2 }
+        return 3
+    }
+    if ($code -in @(51,53,55,56,57)) {
+        if ($null -ne $rain -and $rain -gt 0) {
+            if ($rain -lt 0.3) { return 1 }
+            if ($rain -lt 1) { return 2 }
+            return 3
+        }
+        if ($code -in @(51,56)) { return 1 }
+        if ($code -eq 53) { return 2 }
+        return 3
+    }
+    if ($code -in @(61,63,65,66,67,80,81,82)) {
+        if ($null -ne $rain -and $rain -gt 0) {
+            if ($rain -lt 2.5) { return 1 }
+            if ($rain -lt 7.6) { return 2 }
+            return 3
+        }
+        if ($code -in @(61,66,80)) { return 1 }
+        if ($code -in @(63,81)) { return 2 }
+        return 3
+    }
+    return 2
+}
+
+# ------------------------------------------------------------
+# Icon animation: loops played by WPF itself, so PowerShell does no work
+# per frame. Shapes to animate carry a Tag in the XAML above ("Kind" or
+# "Kind:numbers"). 20 frames per second keeps the CPU cost low.
+# ------------------------------------------------------------
+
+function Set-ArtTiming($animation, [double]$seconds, [bool]$reverse, [double]$delay) {
+    $animation.Duration = New-Object Windows.Duration -ArgumentList ([TimeSpan]::FromSeconds($seconds))
+    $animation.AutoReverse = $reverse
+    $animation.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
+    if ($delay -gt 0) { $animation.BeginTime = [TimeSpan]::FromSeconds($delay) }
+    [Windows.Media.Animation.Timeline]::SetDesiredFrameRate($animation, 20)
+    if ($reverse -and $animation -is [Windows.Media.Animation.DoubleAnimation]) {
+        $ease = New-Object Windows.Media.Animation.SineEase
+        $ease.EasingMode = [Windows.Media.Animation.EasingMode]::EaseInOut
+        $animation.EasingFunction = $ease
+    }
+}
+
+function New-ArtAnimation([double]$from, [double]$to, [double]$seconds,
+                          [bool]$reverse, [double]$delay) {
+    $animation = New-Object Windows.Media.Animation.DoubleAnimation
+    $animation.From = $from
+    $animation.To = $to
+    Set-ArtTiming $animation $seconds $reverse $delay
+    return $animation
+}
+
+# $points: flat list of (fraction of the loop, value) pairs.
+function New-ArtKeyFrames([double[]]$points, [double]$seconds, [double]$delay) {
+    $animation = New-Object Windows.Media.Animation.DoubleAnimationUsingKeyFrames
+    for ($i = 0; $i + 1 -lt $points.Count; $i += 2) {
+        $frame = New-Object Windows.Media.Animation.LinearDoubleKeyFrame -ArgumentList $points[$i + 1],
+            ([Windows.Media.Animation.KeyTime]::FromPercent($points[$i]))
+        [void]$animation.KeyFrames.Add($frame)
+    }
+    Set-ArtTiming $animation $seconds $false $delay
+    return $animation
+}
+
+# Drops, flakes and grains: move down, fading in at the top and out at the
+# bottom, so the jump back to the start is never visible. Each shape stays
+# hidden until its own first fall starts (they are spread over the loop).
+# $spin > 0 also turns the shape about its centre (60 degrees per turn).
+function Start-ArtFall($element, [double]$dx, [double]$dy, [double]$seconds,
+                       [double]$delay, [double]$spin) {
+    $move = New-Object Windows.Media.TranslateTransform
+    if ($spin -gt 0) {
+        $box = $element.Data.Bounds
+        $turn = New-Object Windows.Media.RotateTransform -ArgumentList 0,
+            ($box.X + $box.Width / 2), ($box.Y + $box.Height / 2)
+        $group = New-Object Windows.Media.TransformGroup
+        $group.Children.Add($turn)
+        $group.Children.Add($move)
+        $element.RenderTransform = $group
+        $turn.BeginAnimation([Windows.Media.RotateTransform]::AngleProperty,
+            (New-ArtAnimation 0 60 $spin $false 0))
+    }
+    else {
+        $element.RenderTransform = $move
+    }
+    $element.Opacity = 0
+    $move.BeginAnimation([Windows.Media.TranslateTransform]::XProperty,
+        (New-ArtAnimation 0 $dx $seconds $false $delay))
+    $move.BeginAnimation([Windows.Media.TranslateTransform]::YProperty,
+        (New-ArtAnimation 0 $dy $seconds $false $delay))
+    $element.BeginAnimation([Windows.UIElement]::OpacityProperty,
+        (New-ArtKeyFrames @(0.0, 0.0, 0.15, 1.0, 0.75, 1.0, 1.0, 0.0) $seconds $delay))
+}
+
+# Flurries: drift down while swaying from side to side.
+function Start-ArtSway($element, [double]$seconds, [double]$delay) {
+    $move = New-Object Windows.Media.TranslateTransform
+    $element.RenderTransform = $move
+    $element.Opacity = 0
+    $move.BeginAnimation([Windows.Media.TranslateTransform]::XProperty,
+        (New-ArtKeyFrames @(0.0, 0.0, 0.25, 1.6, 0.5, -1.6, 0.75, 1.6, 1.0, 0.0) $seconds $delay))
+    $move.BeginAnimation([Windows.Media.TranslateTransform]::YProperty,
+        (New-ArtAnimation 0 6 $seconds $false $delay))
+    $element.BeginAnimation([Windows.UIElement]::OpacityProperty,
+        (New-ArtKeyFrames @(0.0, 0.0, 0.15, 1.0, 0.75, 1.0, 1.0, 0.0) $seconds $delay))
+}
+
+# Collects tagged shapes, including those inside groups (the sun).
+function Add-ArtItems($parent, $items) {
+    foreach ($child in @($parent.Children)) {
+        if ([string]$child.Tag) { [void]$items.Add($child) }
+        if ($child -is [Windows.Controls.Canvas]) { Add-ArtItems $child $items }
+    }
+}
+
+function Get-TagNumber([string[]]$parts, [int]$index, [double]$default) {
+    if ($parts.Count -gt $index) {
+        try { return [double]::Parse($parts[$index], $script:invariant) } catch {}
+    }
+    return $default
+}
+
+function Start-ArtAnimations($canvas) {
+    $items = New-Object System.Collections.ArrayList
+    Add-ArtItems $canvas $items
+
+    # Shapes of one kind are spread evenly over their loop.
+    $totals = @{}
+    foreach ($item in $items) {
+        $kind = ([string]$item.Tag -split ':')[0]
+        $totals[$kind] = 1 + [int]$totals[$kind]
+    }
+    $hasCloud = $totals.ContainsKey('Drift')
+    $seen = @{}
+
+    foreach ($item in $items) {
+        $parts = [string[]]([string]$item.Tag -split ':')
+        $kind = $parts[0]
+        $i = [int]$seen[$kind]
+        $seen[$kind] = $i + 1
+        $total = [Math]::Max(1, [int]$totals[$kind])
+
+        try {
+            if ($kind -eq 'Sun') {
+                # With a cloud, the sun bobs towards and away from it (peeking).
+                if ($hasCloud) {
+                    $move = New-Object Windows.Media.TranslateTransform
+                    $item.RenderTransform = $move
+                    $move.BeginAnimation([Windows.Media.TranslateTransform]::XProperty,
+                        (New-ArtAnimation 0 -3 5 $true 0))
+                    $move.BeginAnimation([Windows.Media.TranslateTransform]::YProperty,
+                        (New-ArtAnimation 0 3 5 $true 0))
+                }
+            }
+            elseif ($kind -eq 'Spin') {
+                # 8 rays: a 45 degree turn looks identical, so the loop is seamless.
+                $item.RenderTransform.BeginAnimation([Windows.Media.RotateTransform]::AngleProperty,
+                    (New-ArtAnimation 0 45 4 $false 0))
+            }
+            elseif ($kind -eq 'Pulse') {
+                foreach ($property in @([Windows.Media.ScaleTransform]::ScaleXProperty,
+                                        [Windows.Media.ScaleTransform]::ScaleYProperty)) {
+                    $item.RenderTransform.BeginAnimation($property, (New-ArtAnimation 1 1.08 2.5 $true 0))
+                }
+            }
+            elseif ($kind -eq 'Rock') {
+                $item.RenderTransform.BeginAnimation([Windows.Media.RotateTransform]::AngleProperty,
+                    (New-ArtAnimation -6 6 4 $true 0))
+            }
+            elseif ($kind -eq 'Twinkle') {
+                $item.BeginAnimation([Windows.UIElement]::OpacityProperty,
+                    (New-ArtAnimation 1 0.1 (1.2 + 0.7 * $i) $true 0))
+            }
+            elseif ($kind -eq 'Drift') {
+                # Second cloud drifts the other way; small clouds drift less.
+                $move = $item.RenderTransform.Children[1]
+                $amount = 7 * [Math]::Min(1.0, [double]$item.RenderTransform.Children[0].ScaleX)
+                if ($i % 2 -eq 1) { $amount = -$amount }
+                $move.BeginAnimation([Windows.Media.TranslateTransform]::XProperty,
+                    (New-ArtAnimation $move.X ($move.X + $amount) (3.5 + 1.1 * $i) $true 0))
+            }
+            elseif ($kind -eq 'Rain') {
+                $seconds = Get-TagNumber $parts 1 1.0
+                Start-ArtFall $item -2 6 $seconds ($i * $seconds / $total) 0
+            }
+            elseif ($kind -eq 'Flurry') {
+                $seconds = Get-TagNumber $parts 1 4.2
+                Start-ArtSway $item $seconds ($i * $seconds / $total)
+            }
+            elseif ($kind -eq 'Flake') {
+                $seconds = Get-TagNumber $parts 1 2.8
+                Start-ArtFall $item 1 (Get-TagNumber $parts 3 6) $seconds ($i * $seconds / $total) (Get-TagNumber $parts 2 7)
+            }
+            elseif ($kind -eq 'Grain') {
+                $seconds = Get-TagNumber $parts 1 1.2
+                Start-ArtFall $item 0 7 $seconds ($i * $seconds / $total) 0
+            }
+            elseif ($kind -eq 'Pellet') {
+                Start-ArtFall $item 0 6 1.1 ($i * 1.1 / $total) 0
+            }
+            elseif ($kind -eq 'Hail') {
+                Start-ArtFall $item 0 5 1.0 ($i * 1.0 / $total) 0
+            }
+            elseif ($kind -eq 'Flash') {
+                # A bright double flicker every 3 seconds.
+                $item.BeginAnimation([Windows.UIElement]::OpacityProperty,
+                    (New-ArtKeyFrames @(0.0, 1.0, 0.55, 1.0, 0.58, 0.1, 0.62, 1.0,
+                        0.66, 0.2, 0.70, 1.0, 1.0, 1.0) 3.0 0))
+            }
+            elseif ($kind -eq 'Fog') {
+                $amount = 5.0
+                if ($i % 2 -eq 1) { $amount = -5.0 }
+                $move = New-Object Windows.Media.TranslateTransform
+                $item.RenderTransform = $move
+                $move.BeginAnimation([Windows.Media.TranslateTransform]::XProperty,
+                    (New-ArtAnimation 0 $amount (3.5 + 0.8 * $i) $true 0))
+            }
+        }
+        catch {
+            Write-Log "Icon animation '$kind' failed: $($_.Exception.Message)"
+        }
+    }
 }
 
 function Set-WeatherArt {
@@ -1812,6 +2235,18 @@ function Set-WeatherArt {
     $day = $script:isDay -ne 0
     $rainBlue = '#3AA2EE'
     $drizzleBlue = '#6CC4F4'
+
+    # Intensity sets how many drops fall, where, and how fast.
+    $level = Get-Intensity $code
+    $x0 = @(24, 18, 14)[$level - 1]
+    $count = @(2, 3, 5)[$level - 1]
+    $gap = @(16, 14, 10)[$level - 1]
+    $rainSeconds = @(1.5, 1.0, 0.65)[$level - 1]
+    $drizzleSeconds = @(1.9, 1.4, 1.0)[$level - 1]
+    $rainThick = 2.8
+    if ($level -eq 3) { $rainThick = 2.4 }
+    $pellets = @(50, 56)
+    if ($level -eq 3) { $pellets = @(46, 55, 56, 59) }
 
     if ($code -eq 0) {
         $art = Get-SkyXaml $day 36 35 16
@@ -1829,29 +2264,35 @@ function Set-WeatherArt {
         $art = (Get-CloudXaml 6 6 1.0 'grey') + (Get-FogXaml 50)
     }
     elseif ($code -in @(51,53,55)) {
-        $art = (Get-CloudXaml 6 6 1.0 'light') + (Get-RainXaml 20 47 3 14 8 2.2 $drizzleBlue)
+        $art = (Get-CloudXaml 6 6 1.0 'light') +
+            (Get-RainXaml ($x0 + 2) 47 $count $gap 8 2.2 $drizzleBlue $drizzleSeconds)
     }
     elseif ($code -in @(56,57)) {
-        $art = (Get-CloudXaml 6 6 1.0 'grey') + (Get-RainXaml 18 47 2 14 8 2.2 $drizzleBlue) +
-            (Get-SnowXaml @(50, 56))
+        $art = (Get-CloudXaml 6 6 1.0 'grey') +
+            (Get-RainXaml 18 47 2 14 8 2.2 $drizzleBlue $drizzleSeconds) + (Get-PelletXaml $pellets)
     }
     elseif ($code -in @(61,63,65)) {
-        $art = (Get-CloudXaml 6 6 1.0 'grey') + (Get-RainXaml 18 46 3 14 12 2.8 $rainBlue)
+        $art = (Get-CloudXaml 6 6 1.0 'grey') +
+            (Get-RainXaml $x0 46 $count $gap 12 $rainThick $rainBlue $rainSeconds)
     }
     elseif ($code -in @(66,67)) {
-        $art = (Get-CloudXaml 6 6 1.0 'grey') + (Get-RainXaml 18 46 2 14 12 2.8 $rainBlue) +
-            (Get-SnowXaml @(50, 57))
+        $art = (Get-CloudXaml 6 6 1.0 'grey') +
+            (Get-RainXaml 18 46 2 14 12 2.8 $rainBlue $rainSeconds) + (Get-PelletXaml $pellets)
     }
     elseif ($code -in @(80,81,82)) {
         $art = (Get-SkyXaml $day 52 15 10) + (Get-CloudXaml 4 14 0.95 'light') +
-            (Get-RainXaml 18 52 3 14 11 2.6 $rainBlue)
+            (Get-RainXaml $x0 50 $count $gap 11 ($rainThick - 0.2) $rainBlue $rainSeconds)
     }
-    elseif ($code -in @(71,73,75,77)) {
-        $art = (Get-CloudXaml 6 6 1.0 'light') + (Get-SnowXaml @(20, 53, 36, 61, 52, 53))
+    elseif ($code -in @(71,73,75)) {
+        $art = (Get-CloudXaml 6 6 1.0 'light') + (Get-SnowArt $level 0)
+    }
+    elseif ($code -eq 77) {
+        $art = (Get-CloudXaml 6 6 1.0 'light') +
+            (Get-GrainXaml @(16, 52, 24, 55, 32, 52, 40, 55, 48, 52, 56, 55) 1.2)
     }
     elseif ($code -in @(85,86)) {
         $art = (Get-SkyXaml $day 52 15 10) + (Get-CloudXaml 4 14 0.95 'light') +
-            (Get-SnowXaml @(22, 58, 42, 63))
+            (Get-SnowArt $level 2)
     }
     elseif ($code -eq 95) {
         $art = (Get-CloudXaml 6 4 1.0 'dark') + (Get-BoltXaml 28 34)
@@ -1868,7 +2309,9 @@ function Set-WeatherArt {
         'Width="70" Height="68">' + $art + '</Canvas>'
 
     try {
-        $ui.WeatherArt.Child = [Windows.Markup.XamlReader]::Parse($drawing)
+        $canvas = [Windows.Markup.XamlReader]::Parse($drawing)
+        $ui.WeatherArt.Child = $canvas
+        if ($script:config.AnimateIcons) { Start-ArtAnimations $canvas }
     }
     catch {
         Write-Log "Weather art failed for code ${code}: $($_.Exception.Message)"
@@ -1926,10 +2369,14 @@ function Set-Appearance([switch]$Force) {
     foreach ($name in @(
         'DateText','WeekText','TimeText','LocationText','TempValue','FeelsText',
         'ConditionText','UpdatedText','RefreshButton','SettingsButton',
-        'CloseButton','ResizeGrip'
+        'CloseButton','ResizeGrip','WindText','HumidityText'
     )) {
         $ui[$name].Foreground = $foreground
     }
+    $ui.WindPath.Stroke = $foreground
+    $ui.HumidityPath.Stroke = $foreground
+    $script:statsColor = $foreground.Color
+    Update-StatsArt
 
     $ui.TempUnit.Foreground = $script:mutedBrush   # smaller, softer unit
     $ui.TimeSuffix.Foreground = $script:mutedBrush
@@ -2088,6 +2535,7 @@ function Format-Temperature($value) {
 # Large number with a smaller, softer unit: "12" + "deg C".
 function Set-TemperatureDisplay($value) {
     if ($null -eq $value) {
+        $script:tempText = '--'
         $ui.TempValue.Text = '--'
         $ui.TempUnit.Text = ''
         return
@@ -2095,8 +2543,93 @@ function Set-TemperatureDisplay($value) {
     $n = [int][Math]::Round([double]$value, [MidpointRounding]::AwayFromZero)
     $text = [string][Math]::Abs($n)
     if ($n -lt 0) { $text = $script:ch.Minus + $text }
+    $script:tempText = $text
     $ui.TempValue.Text = $text
     $ui.TempUnit.Text = $script:ch.Deg + 'C'
+}
+
+# Wind speed in m/s (whole numbers) and relative humidity in percent.
+function Set-WindHumidityDisplay($wind, $humidity) {
+    $script:windSpeed = $null
+    $script:humidity = $null
+    if ($null -ne $wind) { $script:windSpeed = [double]$wind }
+    if ($null -ne $humidity) { $script:humidity = [double]$humidity }
+    if ($null -eq $wind) { $ui.WindText.Text = '--' }
+    else {
+        $n = [int][Math]::Round([double]$wind, [MidpointRounding]::AwayFromZero)
+        $ui.WindText.Text = [string]$n + $script:ch.Nbsp + 'm/s'
+    }
+    if ($null -eq $humidity) { $ui.HumidityText.Text = '--' }
+    else {
+        $n = [int][Math]::Round([double]$humidity, [MidpointRounding]::AwayFromZero)
+        $ui.HumidityText.Text = [string]$n + '%'
+    }
+    Update-StatsArt
+}
+
+# Wind lines flow at a pace that follows the wind, roughly by the Beaufort
+# scale: still when calm (under 0.5 m/s), about 10 s per cycle at 1 m/s,
+# 4 s at 5 m/s, 2 s at 12 m/s, never faster than 1 s.
+function Update-WindFlow {
+    $path = $ui.WindPath
+    $seconds = 0.0
+    if ($script:config.AnimateIcons -and $null -ne $script:windSpeed -and $script:windSpeed -ge 0.5) {
+        $seconds = [Math]::Round([Math]::Max(1.0, 16.0 / (1 + 0.6 * $script:windSpeed)), 2)
+    }
+    if ($seconds -eq $script:windSeconds) { return }
+    $script:windSeconds = $seconds
+
+    if ($seconds -gt 0) {
+        # Dash lengths are in units of the line thickness: 12 px on, 4 px off.
+        $path.StrokeDashArray = [Windows.Media.DoubleCollection]::Parse('7.5 2.5')
+        $path.BeginAnimation([Windows.Shapes.Shape]::StrokeDashOffsetProperty,
+            (New-ArtAnimation 0 -10 $seconds $false 0))
+    }
+    else {
+        $path.BeginAnimation([Windows.Shapes.Shape]::StrokeDashOffsetProperty, $null)
+        $path.ClearValue([Windows.Shapes.Shape]::StrokeDashArrayProperty)
+    }
+}
+
+# The droplet is filled up to the humidity level; with animation on, the
+# water line gently rises and falls around that level.
+function Update-HumidityFill {
+    $path = $ui.HumidityPath
+    if ($null -eq $script:humidity) { $path.Fill = $null; return }
+
+    $level = [Math]::Max(0.0, [Math]::Min(1.0, $script:humidity / 100.0))
+    $top = 1.0 - $level
+    $c = $script:statsColor
+    $water = [Windows.Media.Color]::FromArgb(110, $c.R, $c.G, $c.B)
+    $clear = [Windows.Media.Color]::FromArgb(0, $c.R, $c.G, $c.B)
+
+    $brush = New-Object Windows.Media.LinearGradientBrush
+    $brush.StartPoint = New-Object Windows.Point -ArgumentList 0, 0
+    $brush.EndPoint = New-Object Windows.Point -ArgumentList 0, 1
+    $edgeClear = New-Object Windows.Media.GradientStop -ArgumentList $clear, $top
+    $edgeWater = New-Object Windows.Media.GradientStop -ArgumentList $water, $top
+    $brush.GradientStops.Add((New-Object Windows.Media.GradientStop -ArgumentList $clear, 0.0))
+    $brush.GradientStops.Add($edgeClear)
+    $brush.GradientStops.Add($edgeWater)
+    $brush.GradientStops.Add((New-Object Windows.Media.GradientStop -ArgumentList $water, 1.0))
+
+    if ($script:config.AnimateIcons -and $level -gt 0.08 -and $level -lt 0.92) {
+        foreach ($stop in @($edgeClear, $edgeWater)) {
+            $stop.BeginAnimation([Windows.Media.GradientStop]::OffsetProperty,
+                (New-ArtAnimation ($top - 0.07) ($top + 0.07) 2.6 $true 0))
+        }
+    }
+    $path.Fill = $brush
+}
+
+function Update-StatsArt {
+    try {
+        Update-WindFlow
+        Update-HumidityFill
+    }
+    catch {
+        Write-Log "Wind/humidity icon update failed: $($_.Exception.Message)"
+    }
 }
 
 $script:countryCodes = @{}
@@ -2194,6 +2727,7 @@ function Update-WeatherStatus {
         else { $text = "Updated $hours hours ago" }
 
         if ($script:updateFailed) { $text += " $($script:ch.Dot) refresh failed" }
+        if ($null -ne $script:testWeather) { $text = "Test data $($script:ch.Dot) not live weather" }
         $stale = $minutes -ge 45
     }
 
@@ -2202,7 +2736,7 @@ function Update-WeatherStatus {
     # Shown on hover only, except when the user must know: stale data, a
     # failed refresh, no city yet, or nothing loaded.
     $script:footerForced = $stale -or $script:updateFailed -or -not $hasCity -or
-        $null -eq $script:lastUpdated
+        $null -eq $script:lastUpdated -or $null -ne $script:testWeather
     Update-FooterVisibility
 
     $tempOpacity = 1.0
@@ -2212,6 +2746,7 @@ function Update-WeatherStatus {
         $ui.TemperatureText.Opacity = $tempOpacity
         $ui.ConditionText.Opacity = [Math]::Min(1.0, $tempOpacity + 0.15)
         $ui.FeelsText.Opacity = [Math]::Min(1.0, $tempOpacity + 0.15)
+        $ui.WeatherStats.Opacity = [Math]::Min(1.0, $tempOpacity + 0.15)
         $ui.WeatherArt.Opacity = $artOpacity
     }
 }
@@ -2242,6 +2777,7 @@ function Register-WeatherFailure([string]$message) {
 
     if ($null -eq $script:lastUpdated) {
         Set-TemperatureDisplay $null
+        Set-WindHumidityDisplay $null $null
         $ui.ConditionText.Text = 'Unavailable'
         Set-FeelsDisplay ''
 
@@ -2256,13 +2792,24 @@ function Start-Weather {
     if ($null -ne $script:weatherTask) { return }
 
     $script:weatherCity = $script:config.City
+
+    if ($null -ne $script:testWeather) {
+        # Test mode: the made-up values arrive as if Open-Meteo had sent them.
+        $source = New-Object 'System.Threading.Tasks.TaskCompletionSource[string]'
+        $source.SetResult([string]$script:testWeatherJson)
+        $script:weatherTask = $source.Task
+        Update-WeatherStatus
+        return
+    }
+
     $lat = ([double]$script:weatherCity.Latitude).ToString($script:invariant)
     $lon = ([double]$script:weatherCity.Longitude).ToString($script:invariant)
 
     $url = 'https://api.open-meteo.com/v1/forecast' +
         "?latitude=$lat&longitude=$lon" +
-        '&current=temperature_2m,apparent_temperature,weather_code,is_day' +
-        '&temperature_unit=celsius&timezone=auto'
+        '&current=temperature_2m,apparent_temperature,weather_code,is_day,' +
+        'wind_speed_10m,relative_humidity_2m,rain,showers,snowfall' +
+        '&temperature_unit=celsius&wind_speed_unit=ms&timezone=auto'
 
     try {
         $script:weatherTask = $script:http.GetStringAsync($url)
@@ -2303,10 +2850,27 @@ function Complete-Weather {
         $script:weatherCode = [int]$current.weather_code
         $script:isDay = [int]$current.is_day
 
+        # Rain and snow per hour, for the icon's intensity. Open-Meteo gives the
+        # amount for the interval before "now" (normally 15 minutes).
+        $hours = 0.25
+        if ($null -ne $current.interval -and [double]$current.interval -gt 0) {
+            $hours = [double]$current.interval / 3600
+        }
+        $script:rainRate = $null
+        $script:snowRate = $null
+        if ($null -ne $current.rain -or $null -ne $current.showers) {
+            $wet = 0.0
+            if ($null -ne $current.rain) { $wet += [double]$current.rain }
+            if ($null -ne $current.showers) { $wet += [double]$current.showers }
+            $script:rainRate = $wet / $hours
+        }
+        if ($null -ne $current.snowfall) { $script:snowRate = [double]$current.snowfall / $hours }
+
         $description = Get-WeatherDescription $script:weatherCode
         if ($script:weatherCode -eq 0 -and $script:isDay -eq 0) { $description = 'Clear night' }
 
         Set-TemperatureDisplay $current.temperature_2m
+        Set-WindHumidityDisplay $current.wind_speed_10m $current.relative_humidity_2m
         $ui.ConditionText.Text = $description
 
         if ($null -ne $current.apparent_temperature) {
@@ -2351,6 +2915,7 @@ function Set-City($item) {
     $script:weatherCode = -1
 
     Set-TemperatureDisplay $null
+    Set-WindHumidityDisplay $null $null
     $ui.ConditionText.Text = 'Loading' + $script:ch.Ellipsis
     Set-FeelsDisplay ''
     Set-LocationDisplay
@@ -3066,6 +3631,17 @@ $clock24Item.IsCheckable = $true
 [void]$timeMenu.Items.Add($secondsItem)
 [void]$timeMenu.Items.Add($clock24Item)
 [void]$menu.Items.Add($timeMenu)
+
+$animateItem = New-MenuItem 'Animate weather icons' {
+    $script:config.AnimateIcons = [bool]$animateItem.IsChecked
+    Save-Settings
+    Set-WeatherArt   # rebuilds the icon with or without animation
+    $script:windSeconds = -1
+    Update-StatsArt
+}
+$animateItem.IsCheckable = $true
+$animateItem.IsChecked = [bool]$script:config.AnimateIcons
+[void]$menu.Items.Add($animateItem)
 
 $monitorMenu = New-MenuItem 'Keep on monitor' $null
 [void]$menu.Items.Add($monitorMenu)
