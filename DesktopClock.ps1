@@ -58,7 +58,7 @@ Add-Type -AssemblyName System.Windows.Forms
 # ---- Version and update source --------------------------------------------
 # Raise AppVersion before publishing a new GitHub release with a higher tag
 # (e.g. AppVersion 1.1.0 -> release tag v1.1.0).
-$script:AppVersion = [version]'1.0.0'
+$script:AppVersion = [version]'1.0.1'
 $script:UpdateRepo = 'farazzahid27/desktop-clock'
 
 # ------------------------------------------------------------
