@@ -2601,8 +2601,13 @@ function Start-UpdateCheck([switch]$Manual) {
     if ($null -ne $script:updateTask) { return }
     $script:updateManual = [bool]$Manual
     try {
-        $script:updateTask = $script:http.GetStringAsync(
-            "https://api.github.com/repos/$($script:UpdateRepo)/releases/latest")
+        # The public release page redirects to the newest release, e.g.
+        # .../releases/tag/v1.2.0. Reading where it lands needs no GitHub API
+        # call, so the API's 60-requests-per-hour limit per network (often
+        # shared by a whole office) does not apply. Only headers are read.
+        $script:updateTask = $script:http.GetAsync(
+            "https://github.com/$($script:UpdateRepo)/releases/latest",
+            [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead)
     }
     catch {
         Write-Log "Update check could not start: $($_.Exception.Message)"
@@ -2616,8 +2621,18 @@ function Complete-UpdateCheck {
     $manual = $script:updateManual
 
     try {
-        $release = ConvertFrom-Json -InputObject ($task.GetAwaiter().GetResult())
-        $tag = [string]$release.tag_name
+        $response = $task.GetAwaiter().GetResult()
+        try {
+            [void]$response.EnsureSuccessStatusCode()
+            $finalUrl = $response.RequestMessage.RequestUri.AbsoluteUri
+        }
+        finally {
+            $response.Dispose()
+        }
+
+        $match = [regex]::Match($finalUrl, '/releases/tag/([^/?#]+)')
+        if (-not $match.Success) { throw 'No release has been published yet.' }
+        $tag = [Uri]::UnescapeDataString($match.Groups[1].Value)
         $latest = [version]($tag.TrimStart([char[]]'vV'))
 
         $script:config.LastUpdateCheck = (Get-Date).ToString('o', $script:invariant)
@@ -2634,23 +2649,12 @@ function Complete-UpdateCheck {
             return
         }
 
-        # Prefer a DesktopClock.ps1 attached to the release; otherwise use the
-        # file as it was in the repository when that release was tagged.
-        $url = $null
-        foreach ($asset in @($release.assets)) {
-            if ($null -ne $asset -and $asset.name -eq 'DesktopClock.ps1') {
-                $url = [string]$asset.browser_download_url
-            }
-        }
-        if (-not $url) {
-            $url = "https://raw.githubusercontent.com/$($script:UpdateRepo)/$tag/DesktopClock.ps1"
-        }
-
+        # The script exactly as it was when that release was tagged.
         $script:updateInfo = @{
             Version = $latest
             Tag     = $tag
-            Url     = $url
-            Notes   = [string]$release.body
+            Url     = "https://raw.githubusercontent.com/$($script:UpdateRepo)/$tag/DesktopClock.ps1"
+            Page    = "https://github.com/$($script:UpdateRepo)/releases/tag/$tag"
         }
         Update-UpdateMenus
         Write-Log "Update available: v$latest"
@@ -2668,6 +2672,10 @@ function Complete-UpdateCheck {
     catch {
         $message = Get-ErrorText $_.Exception
         if ($message -match '404') { $message = 'No release has been published yet.' }
+        elseif ($message -match '403|429') {
+            $message = 'GitHub is limiting requests from your network right now. ' +
+                'The widget will try again later.'
+        }
         $script:nextUpdateCheck = (Get-Date).AddHours(6)
         Write-Log "Update check failed: $message"
         if ($manual) {
@@ -2701,9 +2709,7 @@ function Install-Update {
         return
     }
 
-    $notes = $info.Notes.Trim()
-    if ($notes.Length -gt 600) { $notes = $notes.Substring(0, 600) + $script:ch.Ellipsis }
-    if ($notes) { $notes = "`n`nWhat's new:`n$notes" }
+    $notes = "`n`nWhat's new: $($info.Page)"
 
     $answer = [Windows.MessageBox]::Show(
         "Update Desktop Clock from v$($script:AppVersion) to v$($info.Version)?$notes`n`n" +
