@@ -3,10 +3,11 @@
 A compact clock and weather widget for the Windows desktop, written in
 PowerShell. No installation and no administrator rights needed.
 
-- Date, ISO week number and time (HH:MM:SS)
+- Date, ISO week number and time: 24- or 12-hour, with or without seconds
 - Current weather for a city you choose: temperature, feels-like,
   condition and a colour icon (data from [Open-Meteo](https://open-meteo.com/))
-- Sits on the desktop behind your windows; wide or stacked layout
+- Show clock and weather (wide or stacked), clock only, or weather only
+- Sits on the desktop behind your windows
 - Automatic light/dark text based on your wallpaper
 - Remembers city, layout and position, also across monitors
 - Optional start at Windows sign-in, optional update check
@@ -43,14 +44,20 @@ bypass a policy set by your organisation.
 
 ## Using it
 
-- **Move:** drag the widget.
-- **Wide / stacked:** drag the resize grip (bottom-right) or use
-  gear -> Layout.
-- **Settings and close:** hover the top-right corner, right-click the
-  widget, or use the tray icon.
-- **Refresh weather:** hover the bottom line of the widget to show
+- **Move:** drag the widget. Each shape (wide, stacked, clock only,
+  weather only) remembers its own position.
+- **What to show:** gear -> Show -> Clock and weather / Clock only /
+  Weather only.
+- **Wide / stacked:** gear -> Layout, or drag the resize grip
+  (bottom-right, only when clock and weather are both shown).
+- **Time format:** gear -> Time -> Show seconds / 24-hour clock.
+- **Settings and close:** move the pointer to the top-right corner; the
+  gear and close buttons appear there briefly. You can also right-click
+  the widget or use the tray icon.
+- **Refresh weather:** hover the bottom line of the weather to show
   "Updated ..." and click the circular arrow next to it. (The line stays
   visible on its own if the weather is out of date or a refresh failed.)
+  In clock-only mode no weather is downloaded.
 
 ## Updates
 

@@ -778,6 +778,10 @@ $script:config = @{
     Theme       = 'Auto'
     Opacity     = 0.15
     UpdateChecks    = $true
+    Show            = 'Both'    # Both | Clock | Weather
+    BothLayout      = 'Wide'    # last layout used when both are shown
+    ShowSeconds     = $true
+    Use24h          = $true
     StartMenu       = $true
     LastUpdateCheck = $null
     Positions   = $null   # per layout: @{ Wide = @{...}; Narrow = @{...} }
@@ -796,6 +800,11 @@ if (Test-Path $script:settingsFile) {
         Write-Log "Settings file unreadable, using defaults: $($_.Exception.Message)"
     }
 }
+
+if ($script:config.Show -notin @('Both','Clock','Weather')) { $script:config.Show = 'Both' }
+if ($script:config.BothLayout -notin @('Wide','Narrow')) { $script:config.BothLayout = 'Wide' }
+try { $script:config.ShowSeconds = [bool]$script:config.ShowSeconds } catch { $script:config.ShowSeconds = $true }
+try { $script:config.Use24h = [bool]$script:config.Use24h } catch { $script:config.Use24h = $true }
 
 try { $script:config.StartMenu = [bool]$script:config.StartMenu }
 catch { $script:config.StartMenu = $true }
@@ -834,7 +843,7 @@ if ($null -ne $script:config.City) {
 
 # Normalise saved per-layout positions into plain hashtables.
 $positions = @{}
-foreach ($layout in @('Wide','Narrow')) {
+foreach ($layout in @('Wide','Narrow','Clock','Weather')) {
     try {
         $entry = $null
         if ($null -ne $script:config.Positions) { $entry = $script:config.Positions.$layout }
@@ -890,6 +899,9 @@ $script:controlsVisible = $false
 
 $script:lastSecond = -1
 $script:lastDate = [DateTime]::MinValue
+$script:lastTimeLength = -1
+$script:lineSpacing = 1.33
+$script:clockBlockWidth = 226.0
 $script:nextMonitorCheck = [DateTime]::MinValue
 $script:nextThemeCheck = [DateTime]::MinValue
 $script:displayCheckAt = $null
@@ -1013,11 +1025,20 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                         <TextBlock x:Name="DateText"
                                    FontSize="14" Opacity="0.72"
                                    TextTrimming="CharacterEllipsis"/>
+                        <!-- Own line for the week when seconds are hidden. -->
+                        <TextBlock x:Name="WeekText"
+                                   FontSize="14" Opacity="0.72"
+                                   Visibility="Collapsed"/>
                         <!-- Hours, minutes and seconds share one size and weight.
                              Tabular digits keep the width steady every second. -->
-                        <TextBlock x:Name="TimeText" Text="00:00:00"
-                                   FontSize="54" Typography.NumeralAlignment="Tabular"
-                                   Margin="-3,-3,0,-4"/>
+                        <StackPanel x:Name="TimeRow" Orientation="Horizontal">
+                            <TextBlock x:Name="TimeText" Text="00:00:00"
+                                       FontSize="54" Typography.NumeralAlignment="Tabular"
+                                       Margin="-3,-3,0,-4"/>
+                            <!-- AM/PM in the 12-hour format, top-aligned like the unit. -->
+                            <TextBlock x:Name="TimeSuffix" FontSize="14"
+                                       VerticalAlignment="Top" Visibility="Collapsed"/>
+                        </StackPanel>
                     </StackPanel>
                 </Grid>
 
@@ -1103,8 +1124,11 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                  the pointer is inside it. Text underneath reserves room for it. -->
             <Border x:Name="ControlHotspot" Tag="NoDrag" Background="#01000000"
                     HorizontalAlignment="Right" VerticalAlignment="Top"
-                    CornerRadius="6" Padding="2" Margin="0,4,4,0">
-                <StackPanel x:Name="CornerButtons" Orientation="Horizontal" Opacity="0">
+                    CornerRadius="6" Margin="0,3,3,0">
+                <!-- Backing in the card's colour: while shown, the buttons cover
+                     the text under them instead of being drawn on top of it. -->
+                <Border x:Name="CornerButtons" Opacity="0" CornerRadius="6" Padding="4,2,2,2">
+                <StackPanel Orientation="Horizontal">
                     <Button x:Name="SettingsButton"
                             Style="{StaticResource IconButton}"
                             Content="&#x2699;" FontSize="14"
@@ -1115,6 +1139,7 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                             Margin="2,0,0,0"
                             ToolTip="Close widget"/>
                 </StackPanel>
+                </Border>
             </Border>
 
             <Thumb x:Name="ResizeGrip" Tag="NoDrag"
@@ -1155,7 +1180,7 @@ $ui = @{}
 @(
     'Card','ContentGrid','ClockPanel','ClockStack','WeatherPanel','WeatherStack',
     'Divider','DateText','TimeText','LocationText','TemperatureText','FeelsText',
-    'TempValue','TempUnit','FooterRow',
+    'TempValue','TempUnit','FooterRow','WeekText','TimeRow','TimeSuffix',
     'WeatherArt','ConditionText','UpdatedText','RefreshButton','ControlHotspot',
     'CornerButtons','SettingsButton','CloseButton','ResizeGrip','TemperatureRow'
 ) | ForEach-Object { $ui[$_] = $window.FindName($_) }
@@ -1193,22 +1218,64 @@ function Measure-Height($element, [double]$width) {
     [Math]::Ceiling($element.DesiredSize.Height)
 }
 
+# Time text in the chosen format. Returns @(digits, suffix); the suffix is
+# AM/PM in the 12-hour format (Windows' own designator), otherwise empty.
+function Get-TimeParts([DateTime]$now) {
+    if ($script:config.Use24h) {
+        $format = 'HH:mm'
+        if ($script:config.ShowSeconds) { $format = 'HH:mm:ss' }
+        return @($now.ToString($format), '')
+    }
+    $format = 'h:mm'
+    if ($script:config.ShowSeconds) { $format = 'h:mm:ss' }
+    $suffix = $now.ToString('tt')
+    if (-not $suffix) { $suffix = $now.ToString('tt', $script:invariant) }
+    return @($now.ToString($format), $suffix.ToUpper())
+}
+
+# Without seconds the week number gets its own line under the date.
+function Test-SplitWeek { return -not [bool]$script:config.ShowSeconds }
+
+function Get-HeaderText([DateTime]$day, [int]$week) {
+    $date = $day.ToString('dddd, dd MMM yyyy')
+    if (Test-SplitWeek) { return $date }
+    return "$date | Week $week"
+}
+
+# Places the top of a small text (unit, AM/PM) level with the top of the
+# digits next to it. In WPF the baseline sits FontFamily.Baseline * size
+# below the top of a line and capitals reach CapsHeight * size above it.
+function Set-CapAlignment($big, $small, [double]$left, [double]$shift) {
+    try {
+        $typeface = New-Object Windows.Media.Typeface -ArgumentList $big.FontFamily,
+            $big.FontStyle, $big.FontWeight, $big.FontStretch
+        $gap = $typeface.FontFamily.Baseline - $typeface.CapsHeight
+        $script:lineSpacing = $typeface.FontFamily.LineSpacing
+        $offset = [Math]::Max(0.0, $gap * ($big.FontSize - $small.FontSize) + $shift)
+        $small.Margin = New-Object Windows.Thickness -ArgumentList $left, $offset, 0, 0
+    }
+    catch {
+        Write-Log "Cap alignment fallback: $($_.Exception.Message)"
+    }
+}
+
 function Update-Metrics {
     $infinite = [double]::PositiveInfinity
 
-    # How far the corner controls reach into the content area (content has a
-    # 16 px side margin), plus a small gap.
+    # Room the corner buttons would need. They now overlay the text on
+    # hover, but this headroom keeps the established clock proportions.
     $ui.ControlHotspot.Measure((New-Size $infinite $infinite))
     $script:controlReserve = [Math]::Max(0.0,
         [double][Math]::Ceiling($ui.ControlHotspot.DesiredSize.Width) - $script:padX + 4)
 
     # Widest header this week (day names differ in length), measured with
-    # the real font. Week 52 stands in for any two-digit week number.
+    # the real font. Week 52 stands in for any two-digit week number, so no
+    # day of the year can be cut off.
     $saved = $ui.DateText.Text
     $longest = 0.0
     $today = (Get-Date).Date
     for ($i = 0; $i -lt 7; $i++) {
-        $ui.DateText.Text = $today.AddDays($i).ToString('dddd, dd MMM yyyy') + ' | Week 52'
+        $ui.DateText.Text = Get-HeaderText ($today.AddDays($i)) 52
         $ui.DateText.Measure((New-Size $infinite $infinite))
         $longest = [Math]::Max($longest,
             [double]$ui.DateText.DesiredSize.Width - $ui.DateText.Margin.Right)
@@ -1216,35 +1283,45 @@ function Update-Metrics {
     $ui.DateText.Text = $saved
     $script:dateWidth = [Math]::Ceiling($longest)
 
-    # Size the time so it ends where the header (plus the corner controls)
-    # ends, like the mock-up: one font size for hours, minutes and seconds.
+    # Time in the current format (the hour may have one or two digits).
+    $parts = Get-TimeParts (Get-Date)
+    $ui.TimeText.Text = $parts[0]
+    $ui.TimeSuffix.Text = $parts[1]
+    if ($parts[1]) { $ui.TimeSuffix.Visibility = 'Visible' } else { $ui.TimeSuffix.Visibility = 'Collapsed' }
+
+    $suffixWidth = 0.0
+    if ($parts[1]) {
+        $ui.TimeSuffix.Margin = New-Object Windows.Thickness -ArgumentList 4, 0, 0, 0
+        $ui.TimeSuffix.Measure((New-Size $infinite $infinite))
+        $suffixWidth = [double]$ui.TimeSuffix.DesiredSize.Width
+    }
+
+    # Size the time so its row ends where the header ends: one font size for
+    # hours, minutes and seconds; AM/PM keeps the small text size.
     $ui.TimeText.FontSize = 54
     $ui.TimeText.Measure((New-Size $infinite $infinite))
     $base = [double]$ui.TimeText.DesiredSize.Width
-    $target = [Math]::Max($base, $script:dateWidth + $script:controlReserve)
+    $headroom = $script:controlReserve
+    if (Test-SplitWeek) { $headroom = 0.0 }
+    $target = [Math]::Max($base + $suffixWidth, $script:dateWidth + $headroom)
     if ($base -gt 0) {
-        # +2 px margin so rounding can never trim the header.
-        $ui.TimeText.FontSize = [Math]::Min(84.0, 54.0 * ($target + 2) / $base)
+        # +2 px so rounding can never trim the header.
+        $ui.TimeText.FontSize = [Math]::Min(84.0, 54.0 * ($target + 2 - $suffixWidth) / $base)
     }
-    $ui.TimeText.Measure((New-Size $infinite $infinite))
-    $timeWidth = [double]$ui.TimeText.DesiredSize.Width
+    if ($parts[1]) { Set-CapAlignment $ui.TimeText $ui.TimeSuffix 4 -3 }
 
-    # Type scale: XL = time and temperature number (same size), L = unit,
-    # M = all other text, S = the "Updated" line. One font, one weight.
-    $ui.TempValue.FontSize = $ui.TimeText.FontSize
-    Update-UnitAlignment
+    $ui.TimeRow.Measure((New-Size $infinite $infinite))
+    $timeWidth = [double]$ui.TimeRow.DesiredSize.Width
     $script:timeWidth = [Math]::Ceiling($timeWidth)
 
     $script:clockWidth = [Math]::Ceiling([Math]::Max($timeWidth, $script:dateWidth))
+    $script:clockBlockWidth = $script:clockWidth
     $script:wideMinWidth = 2 * $script:padX + $script:clockWidth + 29.0 + $script:weatherMinWidth
-    # Stacked layout is exactly as wide as the clock block: the end of the
-    # time is the right edge of the whole widget.
-    # (Widened only if today's date plus the corner controls would not fit.)
-    # Stacked content width: the time, unless the header (plus room for the
-    # corner buttons) is still wider - then the header wins, so the date and
-    # week number are never cut off.
+
+    # Stacked (and weather-only) content width: the time row, unless the
+    # header still needs more - the header is never cut off.
     $script:stackedWidth = [Math]::Ceiling([Math]::Max($script:timeWidth,
-        $script:dateWidth + $script:controlReserve))
+        $script:dateWidth + $headroom))
     $script:narrowMinWidth = 2 * $script:padX + $script:stackedWidth
 }
 
@@ -1253,16 +1330,7 @@ function Update-Metrics {
 # capitals reach CapsHeight * size above it, so the cap tops of two sizes
 # differ by (Baseline - CapsHeight) * (big - small).
 function Update-UnitAlignment {
-    try {
-        $typeface = New-Object Windows.Media.Typeface -ArgumentList $ui.TempValue.FontFamily,
-            $ui.TempValue.FontStyle, $ui.TempValue.FontWeight, $ui.TempValue.FontStretch
-        $gap = $typeface.FontFamily.Baseline - $typeface.CapsHeight
-        $offset = [Math]::Max(0.0, $gap * ($ui.TempValue.FontSize - $ui.TempUnit.FontSize))
-        $ui.TempUnit.Margin = New-Object Windows.Thickness -ArgumentList 3, $offset, 0, 0
-    }
-    catch {
-        Write-Log "Unit alignment fallback: $($_.Exception.Message)"
-    }
+    Set-CapAlignment $ui.TempValue $ui.TempUnit 3 0
 }
 
 # Stacked layout: the icon takes the room left beside the temperature, so a
@@ -1281,17 +1349,40 @@ function Update-ArtSize {
     }
 }
 
+# Wide layout: the icon is sized from the temperature number, so both have
+# the same visual weight (height = number size, drawing aspect ~1.16:1).
+
 # Weather sizing per layout. Wide stays as it is; stacked gets a larger icon
 # and the temperature column is indented slightly from the left edge.
+# Weather sizing per layout.
+#   Wide:    the clock block (date + time) defines the height; city,
+#            temperature + icon and "Feels like" are scaled to fit inside it.
+#            Unit at the small text size.
+#   Stacked / weather only: temperature at the time's size, larger unit,
+#            icon filling the room beside the temperature.
 function Set-WeatherSizing([string]$mode) {
-    if ($mode -eq 'Narrow') {
+    if ($mode -eq 'Wide') {
+        $ui.TempUnit.FontSize = 14
+        $infinite = [double]::PositiveInfinity
+        $ui.ClockStack.Measure((New-Size $infinite $infinite))
+        $clockHeight = [double]$ui.ClockStack.DesiredSize.Height
+        $line = [Math]::Ceiling(14 * $script:lineSpacing)
+        $row = [Math]::Max(30.0, [Math]::Floor($clockHeight - 2 * $line - 2))
+        $ui.TempValue.FontSize = [Math]::Max(20.0, [Math]::Floor($row / $script:lineSpacing))
+        $artWidth = [Math]::Round($row * 1.03)
+        if ($ui.WeatherArt.Width -ne $artWidth -or $ui.WeatherArt.Height -ne $row) {
+            $ui.WeatherArt.Width = $artWidth
+            $ui.WeatherArt.Height = $row
+        }
+        $indent = 0
+    }
+    else {
+        $ui.TempUnit.FontSize = 20
+        $ui.TempValue.FontSize = $ui.TimeText.FontSize
         $indent = 10
         Update-ArtSize
     }
-    else {
-        $indent = 0
-        if ($ui.WeatherArt.Width -ne 68) { $ui.WeatherArt.Width = 68; $ui.WeatherArt.Height = 58 }
-    }
+    Update-UnitAlignment
 
     # Temperature may be indented; "Feels like" always lines up with the city.
     $tempMargin = New-Object Windows.Thickness -ArgumentList $indent, 0, 0, 0
@@ -1300,10 +1391,12 @@ function Set-WeatherSizing([string]$mode) {
     if ($ui.FeelsText.Margin -ne $feelsMargin) { $ui.FeelsText.Margin = $feelsMargin }
 }
 
+# Shapes: Wide / Narrow (clock and weather), Clock (clock only),
+# Weather (weather only).
 function Update-Layout([string]$mode) {
     if ($mode -eq $script:layoutMode) { return }
     $script:layoutMode = $mode
-    Set-WeatherSizing $mode
+    if ($mode -in @('Wide','Narrow')) { $script:config.BothLayout = $mode }
 
     $grid = $ui.ContentGrid
     $grid.ColumnDefinitions.Clear()
@@ -1313,6 +1406,12 @@ function Update-Layout([string]$mode) {
         [Windows.Controls.Grid]::SetRow($ui[$name], 0)
         [Windows.Controls.Grid]::SetColumn($ui[$name], 0)
     }
+
+    $ui.ClockPanel.Visibility = 'Visible'
+    $ui.WeatherPanel.Visibility = 'Visible'
+    $ui.Divider.Visibility = 'Visible'
+    if ($mode -eq 'Clock') { $ui.WeatherPanel.Visibility = 'Collapsed'; $ui.Divider.Visibility = 'Collapsed' }
+    if ($mode -eq 'Weather') { $ui.ClockPanel.Visibility = 'Collapsed'; $ui.Divider.Visibility = 'Collapsed' }
 
     $auto = [Windows.GridLength]::Auto
     $one = New-Object Windows.GridLength -ArgumentList 1
@@ -1327,10 +1426,10 @@ function Update-Layout([string]$mode) {
         [Windows.Controls.Grid]::SetColumn($ui.Divider, 1)
         [Windows.Controls.Grid]::SetColumn($ui.WeatherPanel, 2)
         $ui.ClockPanel.Margin = '0,0,14,0'
-        $ui.Divider.Margin = '0,6,0,6'
+        $ui.Divider.Margin = '0,4,0,4'
         $ui.WeatherPanel.Margin = '14,0,0,0'
     }
-    else {
+    elseif ($mode -eq 'Narrow') {
         foreach ($length in @($auto, $one, $star)) {
             $row = New-Object Windows.Controls.RowDefinition
             $row.Height = $length
@@ -1342,6 +1441,21 @@ function Update-Layout([string]$mode) {
         $ui.Divider.Margin = '0,0,0,0'
         $ui.WeatherPanel.Margin = '0,8,0,0'
     }
+    else {
+        $ui.ClockPanel.Margin = '0'
+        $ui.WeatherPanel.Margin = '0'
+    }
+
+    # "Updated ..." line: its own line in stacked / weather-only; in wide it
+    # appears over the bottom line on hover so it never adds height.
+    if ($mode -eq 'Wide') { $ui.FooterRow.Margin = '0,-20,0,0' }
+    else { $ui.FooterRow.Margin = '0,8,0,0' }
+    Update-FooterBacking
+
+    # The resize grip switches between wide and stacked; single blocks have
+    # one natural shape, so it is hidden there.
+    if ($script:config.Show -eq 'Both') { $ui.ResizeGrip.Visibility = 'Visible' }
+    else { $ui.ResizeGrip.Visibility = 'Collapsed' }
 }
 
 # Natural wide-layout width: clock column + gaps + the widest weather line
@@ -1356,10 +1470,7 @@ function Get-WideWidth {
     foreach ($name in @('TemperatureRow','LocationText')) {
         $element = $ui[$name]
         $element.Measure((New-Size $infinite $infinite))
-        $width = [double]$element.DesiredSize.Width
-        if ($name -eq 'LocationText') {
-            $width = $width - $element.Margin.Right + $script:controlReserve
-        }
+        $width = [double]$element.DesiredSize.Width - $element.Margin.Right
         $widest = [Math]::Max($widest, [double][Math]::Ceiling($width))
     }
 
@@ -1371,17 +1482,12 @@ function Get-WideWidth {
 
 # The top line of each layout keeps clear of the corner controls:
 # wide -> location line (top of the weather column), stacked -> date line.
+# The corner buttons overlay the text while the pointer is in the corner,
+# so no space is reserved for them in any layout.
 function Update-ControlReserve([string]$mode) {
-    $reserve = New-Object Windows.Thickness -ArgumentList 0, 0, $script:controlReserve, 0
     $none = New-Object Windows.Thickness -ArgumentList 0
-    if ($mode -eq 'Wide') {
-        if ($ui.LocationText.Margin -ne $reserve) { $ui.LocationText.Margin = $reserve }
-        if ($ui.DateText.Margin -ne $none) { $ui.DateText.Margin = $none }
-    }
-    else {
-        if ($ui.DateText.Margin -ne $reserve) { $ui.DateText.Margin = $reserve }
-        if ($ui.LocationText.Margin -ne $none) { $ui.LocationText.Margin = $none }
-    }
+    if ($ui.DateText.Margin -ne $none) { $ui.DateText.Margin = $none }
+    if ($ui.LocationText.Margin -ne $none) { $ui.LocationText.Margin = $none }
 }
 
 function Get-MinimumHeight([string]$mode, [double]$width) {
@@ -1392,6 +1498,13 @@ function Get-MinimumHeight([string]$mode, [double]$width) {
         $clock = Measure-Height $ui.ClockStack $script:clockWidth
         $weather = Measure-Height $ui.WeatherStack $weatherWidth
         return 2 * $script:padY + [Math]::Max([double]$clock, [double]$weather) + 2.0
+    }
+
+    if ($mode -eq 'Clock') {
+        return 2 * $script:padY + (Measure-Height $ui.ClockStack $script:clockBlockWidth) + 2
+    }
+    if ($mode -eq 'Weather') {
+        return 2 * $script:padY + (Measure-Height $ui.WeatherStack $script:stackedWidth) + 2
     }
 
     $inner = $script:stackedWidth   # stacked content width (normally the time's width)
@@ -1459,24 +1572,34 @@ function Set-WidgetSize {
     #   wide    -> ends where the weather text (e.g. "Feels like 10 C") ends
     # Dragging the grip switches layout at the midpoint between the two.
     $narrowWidth = [double]$script:narrowMinWidth
-    $wideWidth = Get-WideWidth
 
-    $mode = 'Wide'
-    $w = $wideWidth
-    if ([double]$Width -lt ($narrowWidth + $wideWidth) / 2) {
-        $mode = 'Narrow'
+    if ($script:config.Show -eq 'Clock') {
+        $mode = 'Clock'
+        $w = 2 * $script:padX + $script:clockBlockWidth
+    }
+    elseif ($script:config.Show -eq 'Weather') {
+        $mode = 'Weather'
         $w = $narrowWidth
     }
-    $w = [Math]::Min($w, [Math]::Max($narrowWidth, [double]$maxWidth))
+    else {
+        $wideWidth = Get-WideWidth
+        $mode = 'Wide'
+        $w = $wideWidth
+        if ([double]$Width -lt ($narrowWidth + $wideWidth) / 2) {
+            $mode = 'Narrow'
+            $w = $narrowWidth
+        }
+    }
+    $w = [Math]::Min($w, [Math]::Max(200.0, [double]$maxWidth))
 
     Update-Layout $mode
     Update-ControlReserve $mode
-    if ($mode -eq 'Narrow') { Update-ArtSize }
+    Set-WeatherSizing $mode
 
     # Stacked: lock the content to the width of the time, so the weather icon
     # ends exactly under the last digit of the seconds. If the square card is
     # wider than that, the content is centred with equal side margins.
-    if ($mode -eq 'Narrow') {
+    if ($mode -in @('Narrow','Weather')) {
         if ($ui.ContentGrid.Width -ne $script:stackedWidth) { $ui.ContentGrid.Width = $script:stackedWidth }
         $ui.ContentGrid.HorizontalAlignment = 'Center'
     }
@@ -1487,10 +1610,9 @@ function Set-WidgetSize {
 
     $minHeight = Get-MinimumHeight $mode $w
 
-    if ($mode -eq 'Narrow') {
-        # Stacked layout fits its content exactly: no extra space around it.
-        $Height = 0
-    }
+    # Every shape fits its content exactly (the wide height comes from the
+    # clock block), so there is never empty space to resize away.
+    $Height = 0
     $h = $Height
     if ($h -le 0) { $h = $minHeight }
     $minHeight = [double]$minHeight
@@ -1506,7 +1628,7 @@ function Set-WidgetSize {
 }
 
 function Update-SizeToContent {
-    Set-WidgetSize $window.Width $window.Height
+    Set-WidgetSize (Get-StartWidth) 0
 }
 
 # ============================================================
@@ -1728,6 +1850,23 @@ function Set-WeatherArt {
 # Appearance and automatic contrast
 # ============================================================
 
+$script:backingBrush = $null
+$script:hitBrush = $null
+
+function Update-FooterBacking {
+    if ($null -eq $script:hitBrush) {
+        $script:hitBrush = New-Object Windows.Media.SolidColorBrush -ArgumentList (
+            [Windows.Media.Color]::FromArgb(1, 0, 0, 0))
+        $script:hitBrush.Freeze()
+    }
+    if ($script:layoutMode -eq 'Wide' -and $null -ne $script:backingBrush) {
+        $ui.FooterRow.Background = $script:backingBrush
+    }
+    else {
+        $ui.FooterRow.Background = $script:hitBrush
+    }
+}
+
 function Get-Brush([string]$color) {
     $brush = $script:brushConverter.ConvertFromString($color)
     $brush.Freeze()
@@ -1756,7 +1895,7 @@ function Set-Appearance([switch]$Force) {
     $script:mutedBrush = Get-Brush $muted
 
     foreach ($name in @(
-        'DateText','TimeText','LocationText','TempValue','FeelsText',
+        'DateText','WeekText','TimeText','LocationText','TempValue','FeelsText',
         'ConditionText','UpdatedText','RefreshButton','SettingsButton',
         'CloseButton','ResizeGrip'
     )) {
@@ -1764,6 +1903,15 @@ function Set-Appearance([switch]$Force) {
     }
 
     $ui.TempUnit.Foreground = $script:mutedBrush   # smaller, softer unit
+    $ui.TimeSuffix.Foreground = $script:mutedBrush
+
+    # Patch behind temporary overlays (corner buttons, wide "Updated" line).
+    $backing = New-Object Windows.Media.SolidColorBrush -ArgumentList $bgColor
+    $backing.Opacity = [Math]::Max(0.94, $opacity)
+    $backing.Freeze()
+    $script:backingBrush = $backing
+    $ui.CornerButtons.Background = $backing
+    Update-FooterBacking
 
     $background = New-Object Windows.Media.SolidColorBrush -ArgumentList $bgColor
     $background.Opacity = $opacity   # tiny floor keeps the card hit-testable at "0%"
@@ -1826,8 +1974,17 @@ function Update-AutoTheme([switch]$AllowScreenSample) {
 # ============================================================
 
 function Update-Clock([DateTime]$now) {
-    # Time follows the Windows time separator; layout stays 24-hour HH mm ss.
-    $ui.TimeText.Text = $now.ToString('HH:mm:ss')
+    # Time follows the Windows time separator; 24- or 12-hour as chosen.
+    $parts = Get-TimeParts $now
+    $ui.TimeText.Text = $parts[0]
+    if ($ui.TimeSuffix.Text -ne $parts[1]) { $ui.TimeSuffix.Text = $parts[1] }
+
+    # 12-hour: the hour switches between one and two digits; resize then.
+    $resize = $false
+    if ($parts[0].Length -ne $script:lastTimeLength) {
+        $resize = $script:lastTimeLength -ge 0
+        $script:lastTimeLength = $parts[0].Length
+    }
 
     if ($now.Date -ne $script:lastDate) {
         $script:lastDate = $now.Date
@@ -1838,10 +1995,19 @@ function Update-Clock([DateTime]$now) {
             $thursday,
             [Globalization.CalendarWeekRule]::FirstFourDayWeek,
             [DayOfWeek]::Monday)
-        $ui.DateText.Text = $now.ToString('dddd, dd MMM yyyy') + " | Week $week"
+        $ui.DateText.Text = Get-HeaderText $now $week
+        $ui.WeekText.Text = "Week $week"
+        if (Test-SplitWeek) { $ui.WeekText.Visibility = 'Visible' }
+        else { $ui.WeekText.Visibility = 'Collapsed' }
+        $resize = $true
+    }
 
+    if ($resize) {
         Update-Metrics
-        if ($script:hwnd -ne [IntPtr]::Zero) { Update-SizeToContent }
+        if ($script:hwnd -ne [IntPtr]::Zero) {
+            Update-SizeToContent
+            Move-ToSavedPosition
+        }
     }
 }
 
@@ -2846,10 +3012,31 @@ foreach ($value in @(0, 10, 20, 35, 50, 70)) {
 }
 [void]$menu.Items.Add($opacityMenu)
 
+$showMenu = New-MenuItem 'Show' $null
+foreach ($option in @(@('Both','Clock and weather'), @('Clock','Clock only'), @('Weather','Weather only'))) {
+    $item = New-MenuItem $option[1] {
+        param($sender, $e)
+        Set-ShowMode ([string]$sender.Tag)
+    }
+    $item.Tag = $option[0]
+    $item.IsCheckable = $true
+    [void]$showMenu.Items.Add($item)
+}
+[void]$menu.Items.Add($showMenu)
+
 $sizeMenu = New-MenuItem 'Layout' $null
 [void]$sizeMenu.Items.Add((New-MenuItem 'Wide' { Switch-Layout 'Wide' }))
 [void]$sizeMenu.Items.Add((New-MenuItem 'Stacked' { Switch-Layout 'Narrow' }))
 [void]$menu.Items.Add($sizeMenu)
+
+$timeMenu = New-MenuItem 'Time' $null
+$secondsItem = New-MenuItem 'Show seconds' { Set-TimeOption 'ShowSeconds' ([bool]$secondsItem.IsChecked) }
+$secondsItem.IsCheckable = $true
+$clock24Item = New-MenuItem '24-hour clock' { Set-TimeOption 'Use24h' ([bool]$clock24Item.IsChecked) }
+$clock24Item.IsCheckable = $true
+[void]$timeMenu.Items.Add($secondsItem)
+[void]$timeMenu.Items.Add($clock24Item)
+[void]$menu.Items.Add($timeMenu)
 
 $monitorMenu = New-MenuItem 'Keep on monitor' $null
 [void]$menu.Items.Add($monitorMenu)
@@ -2862,6 +3049,10 @@ $startupMenu = New-MenuItem 'Launch at Windows sign-in' {
     }
     catch {
         $startupMenu.IsChecked = Test-Path $script:startupLink
+    foreach ($entry in $showMenu.Items) { $entry.IsChecked = ($entry.Tag -eq $script:config.Show) }
+    $sizeMenu.IsEnabled = $script:config.Show -eq 'Both'
+    $secondsItem.IsChecked = [bool]$script:config.ShowSeconds
+    $clock24Item.IsChecked = [bool]$script:config.Use24h
     $startMenuItem.IsChecked = Test-Path $script:startMenuLink
         Write-Log "Startup shortcut change failed: $($_.Exception.Message)"
         [void][Windows.MessageBox]::Show(
@@ -3173,9 +3364,39 @@ $ui.ContentGrid.Add_MouseLeftButtonUp({
 })
 $ui.ContentGrid.Add_LostMouseCapture({ Complete-Drag })
 
+# Width to start with for the current "Show" choice.
+function Get-StartWidth {
+    if ($script:config.Show -eq 'Both' -and $script:config.BothLayout -eq 'Narrow') { return 0.0 }
+    return [double]::MaxValue
+}
+
+function Set-ShowMode([string]$show) {
+    if ($show -eq $script:config.Show) { return }
+    Save-Position
+    $script:config.Show = $show
+    $script:layoutMode = ''   # force a fresh layout
+    Set-WidgetSize (Get-StartWidth) $script:config.Height
+    Complete-LayoutSwitch
+    Save-Settings
+    if ($show -ne 'Clock' -and $null -eq $script:weatherTask -and $null -eq $script:lastUpdated) {
+        $script:nextWeather = [DateTime]::MinValue
+    }
+}
+
+function Set-TimeOption([string]$name, [bool]$value) {
+    Save-Position
+    $script:config[$name] = $value
+    $script:lastDate = [DateTime]::MinValue
+    $script:lastTimeLength = -1
+    Update-Clock (Get-Date)          # rebuilds header, metrics and size
+    Move-ToSavedPosition
+    Save-Position
+}
+
 # Remembers the current layout's spot, switches, then moves to the new
 # layout's own remembered spot (if it has one yet).
 function Switch-Layout([string]$mode) {
+    if ($script:config.Show -ne 'Both') { return }
     if ($mode -eq $script:layoutMode) { return }
     Save-Position
     if ($mode -eq 'Wide') { Set-WidgetSize ([double]::MaxValue) 0 }
@@ -3232,7 +3453,7 @@ $window.Add_SourceInitialized({
         [Windows.Interop.HwndSource]::FromHwnd($script:hwnd).AddHook([DesktopClockNative]::Hook)
 
         Initialize-Monitor
-        Set-WidgetSize $script:config.Width $script:config.Height
+        Set-WidgetSize (Get-StartWidth) $script:config.Height
         Move-ToSavedPosition
         $script:startRect = Get-WidgetRect
         [DesktopClockNative]::ClampEnabled = $true
@@ -3292,6 +3513,7 @@ function Invoke-SecondTick([DateTime]$now) {
     }
 
     if ($null -ne $script:config.City -and $null -eq $script:weatherTask -and
+        $script:config.Show -ne 'Clock' -and
         $now -ge $script:nextWeather) {
         Start-Weather
     }
@@ -3377,7 +3599,7 @@ Update-WeatherStatus
 $work = [Windows.SystemParameters]::WorkArea
 $window.Left = $work.Left + 24
 $window.Top = $work.Top + 24
-Set-WidgetSize $script:config.Width $script:config.Height
+Set-WidgetSize (Get-StartWidth) $script:config.Height
 
 $timer.Start()
 
