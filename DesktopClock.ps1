@@ -2846,7 +2846,7 @@ foreach ($value in @(0, 10, 20, 35, 50, 70)) {
 }
 [void]$menu.Items.Add($opacityMenu)
 
-$sizeMenu = New-MenuItem 'Size' $null
+$sizeMenu = New-MenuItem 'Layout' $null
 [void]$sizeMenu.Items.Add((New-MenuItem 'Wide' { Switch-Layout 'Wide' }))
 [void]$sizeMenu.Items.Add((New-MenuItem 'Stacked' { Switch-Layout 'Narrow' }))
 [void]$menu.Items.Add($sizeMenu)

@@ -45,7 +45,7 @@ bypass a policy set by your organisation.
 
 - **Move:** drag the widget.
 - **Wide / stacked:** drag the resize grip (bottom-right) or use
-  gear -> Size.
+  gear -> Layout.
 - **Settings and close:** hover the top-right corner, right-click the
   widget, or use the tray icon.
 - **Refresh weather:** hover the bottom line of the widget to show
