@@ -15,16 +15,19 @@ PowerShell. No installation and no administrator rights needed.
 
 1. Open the [latest release](../../releases/latest) and download the zip
    (**Source code (zip)**).
-2. Extract it to a folder you will keep, for example
-   `Documents\DesktopClock`.
+2. Extract it anywhere, for example in Downloads.
 3. Double-click **DesktopClock.bat**.
    - If Windows says the file was downloaded from another computer, the
      launcher offers to unblock it. Choose **Y** if you trust it.
    - If it reports that PowerShell scripts are not allowed, see
      *Execution policy* below.
-4. Hover the widget's top-right corner, click the gear and choose
+4. On first start the widget installs itself for your account in
+   `%LOCALAPPDATA%\DesktopClock\App` and adds **Desktop Clock** to the
+   Start menu. From then on it always runs from there, so you can delete
+   the downloaded zip and folder.
+5. Hover the widget's top-right corner, click the gear and choose
    **Choose city...** (or right-click the widget).
-5. Optional: gear -> **Launch at Windows sign-in**.
+6. Optional: gear -> **Launch at Windows sign-in**.
 
 ## Execution policy
 
@@ -60,13 +63,14 @@ installed until you confirm; the previous version is kept as
 - City search: `geocoding-api.open-meteo.com`, only while searching.
 - Update check: `api.github.com` once a day (can be turned off).
 
-Settings and a small log are stored in `%LOCALAPPDATA%\DesktopClock`.
+The program copy, settings and a small log are stored in
+`%LOCALAPPDATA%\DesktopClock`.
 Nothing else is collected or sent.
 
 ## Uninstall
 
-Untick **Launch at Windows sign-in**, close the widget, then delete the
-widget folder and `%LOCALAPPDATA%\DesktopClock`.
+Gear -> **Diagnostics** -> **Uninstall Desktop Clock...** removes the
+program copy, its settings and its shortcuts.
 
 ## License
 

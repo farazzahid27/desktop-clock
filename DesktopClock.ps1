@@ -55,6 +55,88 @@ Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Net.Http
 Add-Type -AssemblyName System.Windows.Forms
 
+# ---- Version and update source --------------------------------------------
+# Raise AppVersion before publishing a new GitHub release with a higher tag
+# (e.g. AppVersion 1.1.0 -> release tag v1.1.0).
+$script:AppVersion = [version]'1.1.0'
+$script:UpdateRepo = 'farazzahid27/desktop-clock'
+
+# ------------------------------------------------------------
+# Self-install: one per-user copy in %LOCALAPPDATA%\DesktopClock\App
+# ------------------------------------------------------------
+# Wherever the script is started from (Downloads, OneDrive, a USB stick),
+# it copies itself to the fixed folder below and runs from there. Startup,
+# the Start menu entry and updates only ever use that copy, so the
+# downloaded files can be deleted. Plain file copy: no installer, no admin
+# rights, nothing outside the user's own profile.
+
+$script:installFolder = Join-Path $env:LOCALAPPDATA 'DesktopClock\App'
+$script:installedScript = Join-Path $script:installFolder 'DesktopClock.ps1'
+
+function Get-ScriptVersion([string]$text) {
+    $match = [regex]::Match($text, "AppVersion = \[version\]'([0-9.]+)'")
+    if ($match.Success) { return [version]$match.Groups[1].Value }
+    return $null
+}
+
+function Start-ScriptHidden([string]$path) {
+    $ps = Join-Path $PSHOME 'powershell.exe'
+    $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+    $psArguments = '-NoProfile -WindowStyle Hidden -File "' + $path + '"'
+    if (Test-Path $conhost) {
+        Start-Process -FilePath $conhost -ArgumentList ('--headless "' + $ps + '" ' + $psArguments)
+    }
+    else {
+        Start-Process -FilePath $ps -ArgumentList $psArguments -WindowStyle Hidden
+    }
+}
+
+$script:isInstalledCopy = $false
+if ($PSCommandPath) {
+    $script:isInstalledCopy = [string]::Equals(
+        [IO.Path]::GetFullPath($PSCommandPath),
+        [IO.Path]::GetFullPath($script:installedScript),
+        [StringComparison]::OrdinalIgnoreCase)
+}
+
+if ($PSCommandPath -and -not $script:isInstalledCopy) {
+    $installNote = $null
+    try {
+        $thisText = [IO.File]::ReadAllText($PSCommandPath)
+        $installedText = $null
+        if (Test-Path -LiteralPath $script:installedScript) {
+            $installedText = [IO.File]::ReadAllText($script:installedScript)
+        }
+        $installedVersion = $null
+        if ($null -ne $installedText) { $installedVersion = Get-ScriptVersion $installedText }
+
+        # Install when missing, older, or the same version with other content.
+        # A newer installed copy is never replaced by an older download.
+        $install = $null -eq $installedText -or $null -eq $installedVersion -or
+            $installedVersion -lt $script:AppVersion -or
+            ($installedVersion -eq $script:AppVersion -and $installedText -cne $thisText)
+
+        if ($install) {
+            [void][IO.Directory]::CreateDirectory($script:installFolder)
+            [IO.File]::WriteAllText($script:installedScript, $thisText,
+                (New-Object Text.UTF8Encoding -ArgumentList $false))
+            $installNote = "Desktop Clock v$($script:AppVersion) is installed for your account in:`n" +
+                "$($script:installFolder)`n`n" +
+                'It now runs from there (also at sign-in, from the Start menu and for updates), ' +
+                'so the downloaded files are no longer needed and can be deleted.'
+        }
+    }
+    catch {
+        [void][Windows.MessageBox]::Show(
+            "Desktop Clock could not be installed:`n`n$($_.Exception.Message)", 'Desktop Clock')
+        return
+    }
+
+    Start-ScriptHidden $script:installedScript
+    if ($installNote) { [void][Windows.MessageBox]::Show($installNote, 'Desktop Clock') }
+    return
+}
+
 # ------------------------------------------------------------
 # Single instance (Startup shortcut + manual launch)
 # ------------------------------------------------------------
@@ -633,11 +715,6 @@ Add-Type -TypeDefinition $nativeSource -ReferencedAssemblies $nativeReferences
 
 $script:invariant = [Globalization.CultureInfo]::InvariantCulture
 
-# ---- Version and update source --------------------------------------------
-# Raise AppVersion before publishing a new GitHub release with a higher tag
-# (e.g. AppVersion 1.1.0 -> release tag v1.1.0).
-$script:AppVersion = [version]'1.0.0'
-$script:UpdateRepo = 'farazzahid27/desktop-clock'
 $script:ch = @{
     Deg      = [string][char]0x00B0
     Dot      = [string][char]0x00B7
@@ -655,7 +732,10 @@ $script:startupLink = Join-Path `
 
 $script:logSeen = @{}
 
+$script:uninstalling = $false
+
 function Write-Log([string]$message) {
+    if ($script:uninstalling) { return }
     try {
         $now = Get-Date
         if ($script:logSeen.ContainsKey($message) -and
@@ -698,6 +778,7 @@ $script:config = @{
     Theme       = 'Auto'
     Opacity     = 0.15
     UpdateChecks    = $true
+    StartMenu       = $true
     LastUpdateCheck = $null
     Positions   = $null   # per layout: @{ Wide = @{...}; Narrow = @{...} }
 }
@@ -715,6 +796,9 @@ if (Test-Path $script:settingsFile) {
         Write-Log "Settings file unreadable, using defaults: $($_.Exception.Message)"
     }
 }
+
+try { $script:config.StartMenu = [bool]$script:config.StartMenu }
+catch { $script:config.StartMenu = $true }
 
 try { $script:config.UpdateChecks = [bool]$script:config.UpdateChecks }
 catch { $script:config.UpdateChecks = $true }
@@ -769,6 +853,7 @@ foreach ($layout in @('Wide','Narrow')) {
 $script:config.Positions = $positions
 
 function Save-Settings {
+    if ($script:uninstalling) { return }
     try {
         [void][IO.Directory]::CreateDirectory($script:settingsFolder)
         $json = $script:config | ConvertTo-Json -Depth 5
@@ -2344,20 +2429,36 @@ function Select-Monitor([string]$device) {
     }
 }
 
-function Set-Startup([bool]$enabled) {
-    if ($enabled) {
-        if (-not $script:scriptPath) { throw 'Run the widget from a saved .ps1 file first.' }
+# The tray icon saved as a small .ico next to the installed copy, so the
+# Start menu and startup shortcuts show the widget's own icon.
+function Get-LauncherIcon {
+    $path = Join-Path $script:installFolder 'DesktopClock.ico'
+    if (Test-Path -LiteralPath $path) { return $path }
+    if ($null -eq $script:tray -or $null -eq $script:tray.Icon) { return $null }
+    try {
+        [void][IO.Directory]::CreateDirectory($script:installFolder)
+        $stream = [IO.File]::Create($path)
+        try { $script:tray.Icon.Save($stream) } finally { $stream.Dispose() }
+        return $path
+    }
+    catch { return $null }
+}
 
-        $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut($script:startupLink)
-        $powershell = Join-Path $PSHOME 'powershell.exe'
-        $psArguments = '-NoProfile -WindowStyle Hidden -File "' + $script:scriptPath + '"'
-        $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+# Shortcut that starts the installed copy without any console window.
+function Save-LauncherShortcut([string]$linkPath) {
+    if (-not $script:scriptPath) { throw 'Run the widget from a saved .ps1 file first.' }
 
-        # Built-in conhost.exe with --headless runs PowerShell without creating
-        # any console window (no flash, also when Windows Terminal is the
-        # default terminal). --headless is not officially documented, so the
-        # plain hidden PowerShell launch is used if conhost.exe is missing.
+    $powershell = Join-Path $PSHOME 'powershell.exe'
+    $psArguments = '-NoProfile -WindowStyle Hidden -File "' + $script:scriptPath + '"'
+    $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+
+    [void][IO.Directory]::CreateDirectory((Split-Path $linkPath -Parent))
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $shortcut = $shell.CreateShortcut($linkPath)
+        # conhost.exe --headless runs PowerShell without creating a console
+        # window. --headless is not officially documented, so a plain hidden
+        # PowerShell launch is used if conhost.exe is missing.
         if (Test-Path $conhost) {
             $shortcut.TargetPath = $conhost
             $shortcut.Arguments = '--headless "' + $powershell + '" ' + $psArguments
@@ -2367,14 +2468,51 @@ function Set-Startup([bool]$enabled) {
             $shortcut.Arguments = $psArguments
         }
         $shortcut.WorkingDirectory = Split-Path $script:scriptPath -Parent
-        $shortcut.WindowStyle = 7   # start minimised if a console window appears at all
+        $icon = Get-LauncherIcon
+        if ($icon) { $shortcut.IconLocation = "$icon,0" }
+        $shortcut.WindowStyle = 7
         $shortcut.Description = 'Desktop Clock and Weather'
         $shortcut.Save()
+    }
+    finally {
         [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
     }
-    elseif (Test-Path $script:startupLink) {
-        Remove-Item $script:startupLink -Force
-    }
+}
+
+function Set-Startup([bool]$enabled) {
+    if ($enabled) { Save-LauncherShortcut $script:startupLink }
+    elseif (Test-Path $script:startupLink) { Remove-Item $script:startupLink -Force }
+}
+
+$script:startMenuLink = Join-Path ([Environment]::GetFolderPath('Programs')) 'Desktop Clock.lnk'
+
+function Set-StartMenu([bool]$enabled) {
+    if ($enabled) { Save-LauncherShortcut $script:startMenuLink }
+    elseif (Test-Path $script:startMenuLink) { Remove-Item $script:startMenuLink -Force }
+}
+
+# Keeps shortcuts pointing at the installed copy (e.g. a startup shortcut
+# created by an older version that ran from another folder).
+function Update-Shortcuts {
+    if (-not $script:isInstalledCopy) { return }
+    try { if (Test-Path $script:startupLink) { Set-Startup $true } }
+    catch { Write-Log "Startup shortcut refresh failed: $($_.Exception.Message)" }
+    try { Set-StartMenu ([bool]$script:config.StartMenu) }
+    catch { Write-Log "Start menu shortcut failed: $($_.Exception.Message)" }
+}
+
+function Uninstall-Widget {
+    $answer = [Windows.MessageBox]::Show(
+        "Remove Desktop Clock from this account?`n`n" +
+        "This closes the widget and deletes its program copy, settings, log and " +
+        "shortcuts (folder $($script:settingsFolder)).",
+        'Uninstall Desktop Clock', 'YesNo', 'Warning')
+    if ($answer -ne 'Yes') { return }
+
+    try { Set-Startup $false } catch {}
+    try { Set-StartMenu $false } catch {}
+    $script:uninstalling = $true
+    $window.Close()   # the folder is deleted after the window has closed
 }
 
 # ============================================================
@@ -2548,18 +2686,8 @@ function Complete-UpdateDownload {
 # closes this one. The single-instance lock is released first.
 function Restart-Widget {
     Save-Position
-    $ps = Join-Path $PSHOME 'powershell.exe'
-    $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
-    $psArguments = '-NoProfile -WindowStyle Hidden -File "' + $script:scriptPath + '"'
-
     $script:mutex.Dispose()
-
-    if (Test-Path $conhost) {
-        Start-Process -FilePath $conhost -ArgumentList ('--headless "' + $ps + '" ' + $psArguments)
-    }
-    else {
-        Start-Process -FilePath $ps -ArgumentList $psArguments -WindowStyle Hidden
-    }
+    Start-ScriptHidden $script:scriptPath
     $window.Close()
 }
 
@@ -2646,6 +2774,7 @@ $startupMenu = New-MenuItem 'Launch at Windows sign-in' {
     }
     catch {
         $startupMenu.IsChecked = Test-Path $script:startupLink
+    $startMenuItem.IsChecked = Test-Path $script:startMenuLink
         Write-Log "Startup shortcut change failed: $($_.Exception.Message)"
         [void][Windows.MessageBox]::Show(
             'Could not change the startup setting. Your organization may block this.',
@@ -2654,6 +2783,20 @@ $startupMenu = New-MenuItem 'Launch at Windows sign-in' {
 }
 $startupMenu.IsCheckable = $true
 [void]$menu.Items.Add($startupMenu)
+
+$startMenuItem = New-MenuItem 'Show in Start menu' {
+    try {
+        Set-StartMenu ([bool]$startMenuItem.IsChecked)
+        $script:config.StartMenu = [bool]$startMenuItem.IsChecked
+        Save-Settings
+    }
+    catch {
+        $startMenuItem.IsChecked = Test-Path $script:startMenuLink
+        Write-Log "Start menu change failed: $($_.Exception.Message)"
+    }
+}
+$startMenuItem.IsCheckable = $true
+[void]$menu.Items.Add($startMenuItem)
 
 $updateMenu = New-MenuItem ('Update available' + $script:ch.Ellipsis) { Install-Update }
 $updateMenu.FontWeight = 'SemiBold'
@@ -2684,6 +2827,10 @@ $contrastInfo.IsEnabled = $false
 [void]$diagnosticsMenu.Items.Add($placementInfo)
 [void]$diagnosticsMenu.Items.Add($monitorInfo)
 [void]$diagnosticsMenu.Items.Add($contrastInfo)
+$installInfo = New-MenuItem "Installed in: $($script:installFolder)" $null
+$installInfo.IsEnabled = $false
+[void]$diagnosticsMenu.Items.Add($installInfo)
+[void]$diagnosticsMenu.Items.Add((New-MenuItem ('Uninstall Desktop Clock' + $script:ch.Ellipsis) { Uninstall-Widget }))
 [void]$diagnosticsMenu.Items.Add((New-MenuItem 'Open settings and log folder' {
     [void][IO.Directory]::CreateDirectory($script:settingsFolder)
     Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $script:settingsFolder + '"')
@@ -3018,6 +3165,8 @@ $window.Add_ContentRendered({
     Set-Appearance
     Save-Position
 
+    Update-Shortcuts
+
     $os = [Environment]::OSVersion.Version
     Write-Log ("Started. Windows {0}, PowerShell {1}, monitor {2}, auto contrast: {3}" -f
         $os, $PSVersionTable.PSVersion, [DesktopClockNative]::CurrentDevice, $script:themeSource)
@@ -3156,4 +3305,15 @@ finally {
 
     $script:http.Dispose()
     $script:mutex.Dispose()
+
+    if ($script:uninstalling) {
+        # The script file is not locked while running, so the whole folder,
+        # including this program copy, can be removed.
+        try { Remove-Item -LiteralPath $script:settingsFolder -Recurse -Force -ErrorAction Stop }
+        catch {
+            [void][Windows.MessageBox]::Show(
+                "Desktop Clock was closed, but this folder could not be fully deleted:`n" +
+                "$($script:settingsFolder)`n`n$($_.Exception.Message)", 'Desktop Clock')
+        }
+    }
 }
