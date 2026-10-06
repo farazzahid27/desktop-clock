@@ -1,88 +1,159 @@
-# Desktop Clock
+# Desktop Clock & Weather
 
-A compact clock and weather widget for the Windows desktop, written in
-PowerShell. No installation and no administrator rights needed.
+A clean clock and current-weather widget that sits on your Windows desktop,
+behind your other windows, like part of the wallpaper.
 
-- Date, ISO week number and time: 24- or 12-hour, with or without seconds
-- Current weather for a city you choose: temperature, feels-like,
-  condition and a colour icon (data from [Open-Meteo](https://open-meteo.com/))
-- Show clock and weather (wide or stacked), clock only, or weather only
-- Sits on the desktop behind your windows
-- Automatic light/dark text based on your wallpaper
-- Remembers city, layout and position, also across monitors
-- Optional start at Windows sign-in, optional update check
+It runs on Windows PowerShell 5.1, which is built into Windows 10 and 11.
+There is nothing to install system-wide and no administrator rights are needed.
 
-## Install
+## Features
 
-1. Open the [latest release](../../releases/latest) and download the zip
-   (**Source code (zip)**).
-2. Extract it anywhere, for example in Downloads.
-3. Double-click **DesktopClock.bat**.
-   - If Windows says the file was downloaded from another computer, the
-     launcher offers to unblock it. Choose **Y** if you trust it.
-   - If it reports that PowerShell scripts are not allowed, see
-     *Execution policy* below.
-4. On first start the widget installs itself for your account in
-   `%LOCALAPPDATA%\DesktopClock\App` and adds **Desktop Clock** to the
-   Start menu. From then on it always runs from there, so you can delete
-   the downloaded zip and folder.
-5. Hover the widget's top-right corner, click the gear and choose
-   **Choose city...** (or right-click the widget).
-6. Optional: gear -> **Launch at Windows sign-in**.
+- **Clock:** time with or without seconds, 24- or 12-hour format, date and week
+  number.
+- **Current weather:** temperature, "feels like" temperature and conditions
+  for the city you choose, refreshed every 15 minutes.
+- **Wind and humidity:** current wind speed (m/s) and relative humidity.
+- **Animated weather icons:** sun, moon, clouds, rain, snow, thunderstorms and
+  fog move gently. Rain and snow follow the real precipitation amount, and the
+  wind and humidity symbols follow the real values. Animations can be turned
+  off.
+- **Layouts:** wide or stacked, or the clock or weather on its own.
+- **Automatic contrast:** switches between light and dark text based on the
+  wallpaper behind the widget. Light and dark can also be set by hand.
+- **Remembers its place:** position per layout and per monitor, and it returns
+  to its monitor when the monitor is reconnected.
+- **Automatic updates:** new versions install in the background.
 
-## Execution policy
+## Download
 
-Windows does not run PowerShell scripts by default. On a personal PC you
-can allow scripts for your own account only (no admin rights needed):
+**[Download Desktop Clock & Weather](https://github.com/farazzahid27/desktop-clock/releases/latest/download/DesktopClockWeather.zip)**
 
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-```
+## Installation
 
-On a work computer, follow your organisation's rules and ask IT. Do not
-bypass a policy set by your organisation.
+1. Unzip the download.
+2. Run the included `.bat` file.
 
-## Using it
+The widget installs itself for your account only and starts right away. You
+can delete the downloaded files afterwards.
 
-- **Move:** drag the widget. Each shape (wide, stacked, clock only,
-  weather only) remembers its own position.
-- **What to show:** gear -> Show -> Clock and weather / Clock only /
-  Weather only.
-- **Wide / stacked:** gear -> Layout, or drag the resize grip
-  (bottom-right, only when clock and weather are both shown).
-- **Time format:** gear -> Time -> Show seconds / 24-hour clock.
-- **Settings and close:** move the pointer to the top-right corner; the
-  gear and close buttons appear there briefly. You can also right-click
-  the widget or use the tray icon.
-- **Refresh weather:** hover the bottom line of the weather to show
-  "Updated ..." and click the circular arrow next to it. (The line stays
-  visible on its own if the weather is out of date or a refresh failed.)
-  In clock-only mode no weather is downloaded.
+To start the widget again later, use **Desktop Clock & Weather** in the Start
+menu. To start it automatically, right-click the widget and choose
+**Launch at Windows sign-in**.
+
+## Getting started
+
+Right-click the widget and choose **Choose city**, search for your city and
+select it. The weather appears within a few seconds.
+
+Drag the widget to move it. Drag the small corner at the bottom right to
+switch between the wide and stacked layouts.
+
+## Settings
+
+Right-click anywhere on the widget, or use the gear button that appears in its
+top-right corner:
+
+| Menu item | What it does |
+| --- | --- |
+| Choose city | Search for and select the city for the weather |
+| Refresh weather | Fetch the weather right now |
+| Appearance | Auto (follows the wallpaper), Light or Dark |
+| Background opacity | How visible the widget's background is |
+| Show | Clock and weather, clock only, or weather only |
+| Layout | Wide or stacked |
+| Time | Show seconds, 24-hour clock |
+| Animate weather icons | Turn icon animations on or off |
+| Keep on monitor | Choose which monitor the widget stays on |
+| Launch at Windows sign-in | Start the widget automatically |
+| Show in Start menu | Add or remove the Start menu entry |
+| Updates | Check now, or turn automatic updates on or off |
+| Diagnostics | Technical information, the settings folder, and uninstall |
+| Close widget | Close the widget until you start it again |
+
+The widget also has an icon in the notification area (system tray).
+Left-click it to bring the widget to the front for 5 seconds; right-click it
+for settings and to close the widget.
 
 ## Updates
 
-Once a day the widget asks GitHub whether a newer release exists. If so,
-it shows **Update to vX.Y.Z...** in its menu and tray icon. Nothing is
-installed until you confirm; the previous version is kept as
-`DesktopClock.ps1.bak`. Turn the daily check off under gear -> Updates.
+The widget checks for a new version once a day and installs it
+automatically, then shows a short notification about what changed. Your
+settings, city and position are kept.
 
-## Network and privacy
+You can check right away, or turn automatic updates off, under
+**Updates** in the right-click menu. Each update keeps the previous version as
+a backup in the program folder.
 
-- Weather: `api.open-meteo.com` every 15 minutes (city coordinates only).
-- City search: `geocoding-api.open-meteo.com`, only while searching.
-- Update check: this repository's release page on `github.com` once a
-  day (can be turned off); updates are downloaded from
-  `raw.githubusercontent.com` only after you confirm.
+## Privacy
 
-The program copy, settings and a small log are stored in
-`%LOCALAPPDATA%\DesktopClock`.
-Nothing else is collected or sent.
+Desktop Clock & Weather does not collect, store or send any personal
+information, and it contains no tracking or analytics.
+
+It connects to the internet only for:
+
+- **Weather:** the coordinates of the city you choose are sent to
+  [Open-Meteo](https://open-meteo.com) every 15 minutes to get the current
+  weather. City searches are also sent to Open-Meteo.
+- **Updates:** once a day it checks this GitHub repository for a new version
+  and, if there is one, downloads it from GitHub.
+
+Your settings stay on your own PC, in `%LOCALAPPDATA%\DesktopClock`.
+
+GitHub shows the project owner how many times the download file has been
+downloaded, as a single total. No information about who downloaded it is
+available to the owner.
+
+## For IT administrators
+
+- Installs per user in `%LOCALAPPDATA%\DesktopClock`. No administrator rights,
+  services, scheduled tasks or system-wide changes are needed. Shortcuts are
+  only created in the user's own Start menu and, if the user chooses, the
+  user's Startup folder.
+- Automatic updates can be turned off for all users of a PC with this registry
+  value:
+
+      HKLM\Software\Policies\DesktopClock
+      DisableAutoUpdate (DWORD) = 1
+
+  The same value under `HKCU` turns them off for one user. Users are then told
+  when a new version is available, but nothing is installed.
+- If your organisation enforces signed scripts or restricts PowerShell
+  (for example Constrained Language Mode), the widget does not try to work
+  around it. It stops or skips updates and tells the user instead.
+- Network access: `api.open-meteo.com` and `geocoding-api.open-meteo.com`
+  (weather and city search), `github.com` and `raw.githubusercontent.com`
+  (update check and download). The system proxy is used.
 
 ## Uninstall
 
-Gear -> **Diagnostics** -> **Uninstall Desktop Clock...** removes the
-program copy, its settings and its shortcuts.
+Right-click the widget and choose
+**Diagnostics → Uninstall Desktop Clock & Weather**. This removes the program,
+its settings, its log and its shortcuts.
+
+## Troubleshooting
+
+**"The file is not digitally signed" or "running scripts is disabled".**
+Windows blocks scripts downloaded from the internet. In PowerShell, in the
+folder with the downloaded files, run:
+
+    Unblock-File .\DesktopClock.ps1
+
+If it still does not run, your organisation may restrict PowerShell scripts.
+Please ask your IT team rather than trying to work around it.
+
+**The weather does not load.** Check that a city is chosen and that your
+network allows access to `open-meteo.com`. The line under the weather shows
+when the last update succeeded; hover over it for details.
+
+**Something else.** Right-click the widget, choose
+**Diagnostics → Open settings and log folder**, and include `widget.log` when
+you report the problem in this repository's Issues.
+
+## Credits
+
+Weather data by [Open-Meteo.com](https://open-meteo.com), licensed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+See the [LICENSE](LICENSE) file in this repository.
