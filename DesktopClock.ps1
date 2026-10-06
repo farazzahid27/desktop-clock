@@ -58,7 +58,7 @@ Add-Type -AssemblyName System.Windows.Forms
 # ---- Version and update source --------------------------------------------
 # Raise AppVersion before publishing a new GitHub release with a higher tag
 # (e.g. AppVersion 1.1.0 -> release tag v1.1.0).
-$script:AppVersion = [version]'1.2.0'
+$script:AppVersion = [version]'1.0.0'
 $script:UpdateRepo = 'farazzahid27/desktop-clock'
 
 # ------------------------------------------------------------
@@ -2602,7 +2602,7 @@ function Start-UpdateCheck([switch]$Manual) {
     $script:updateManual = [bool]$Manual
     try {
         # The public release page redirects to the newest release, e.g.
-        # .../releases/tag/v1.2.0. Reading where it lands needs no GitHub API
+        # .../releases/tag/v1.0.0. Reading where it lands needs no GitHub API
         # call, so the API's 60-requests-per-hour limit per network (often
         # shared by a whole office) does not apply. Only headers are read.
         $script:updateTask = $script:http.GetAsync(
