@@ -3231,6 +3231,7 @@ function Set-WeatherTooltip {
     $data = 'Open-Meteo'
     if ($script:shownSource -eq 'FMI') { $data = 'Finnish Meteorological Institute (FMI), CC BY 4.0' }
     $lines += "Weather data: $data. Refreshes every 15 minutes."
+    if ($script:shownSource -eq 'FMI' -and $script:obsInfo) { $lines += $script:obsInfo }
     $ui.UpdatedText.ToolTip = $lines -join "`n"
 }
 
@@ -3269,6 +3270,7 @@ $script:weatherSource = 'Open-Meteo'   # source of the request in progress
 $script:shownSource = 'Open-Meteo'     # source of the weather on screen
 $script:fmiPausedUntil = [DateTime]::MinValue
 $script:fmiPlainQuery = $false         # true if FMI refused the time window
+$script:fmiAskFeels = $true            # false if FMI refused the FeelsLike value
 $script:levelHint = $null              # FMI's own light/moderate/heavy
 
 # FMI WeatherSymbol3 -> widget weather code (for the icon) and FMI's wording.
@@ -3298,6 +3300,7 @@ function Get-FmiUrl([string]$lat, [string]$lon) {
         '&storedquery_id=fmi::forecast::edited::weather::scandinavia::point::simple' +
         "&latlon=$lat,$lon&timestep=60" +
         '&parameters=Temperature,Humidity,WindSpeedMS,WeatherSymbol3,Precipitation1h'
+    if ($script:fmiAskFeels) { $url += ',FeelsLike' }
     if (-not $script:fmiPlainQuery) {
         # Only the current and next hour, to keep the answer small.
         $hour = [DateTime]::UtcNow
@@ -3327,23 +3330,23 @@ function Test-Daylight([double]$latitude, [double]$longitude, [DateTime]$utc) {
     return $elevation -gt -0.833
 }
 
-# "Feels like": wind chill when cold and windy, heat index when hot and
-# humid (the usual meteorological formulas), otherwise the temperature.
+# "Feels like", calculated the way FMI does when FMI does not send its own
+# value: wind chill at every temperature (with wind in m/s, so wind always
+# makes it feel colder) plus extra warmth from humidity above 14.5 C (the
+# summer simmer index, compared with a comfortable 50 % humidity).
+function Get-SummerSimmer([double]$temperature, [double]$humidity) {
+    $f = 1.8 * $temperature + 32
+    return (1.98 * ($f - (0.55 - 0.0055 * $humidity) * ($f - 58)) - 56.83 - 32) / 1.8
+}
+
 function Get-FeelsLike([double]$temperature, [double]$wind, [double]$humidity) {
-    $kmh = $wind * 3.6
-    if ($temperature -le 10 -and $kmh -ge 4.8) {
-        $v = [Math]::Pow($kmh, 0.16)
-        return 13.12 + 0.6215 * $temperature - 11.37 * $v + 0.3965 * $temperature * $v
+    $chill = 15 + (1 - 15 / 37.0) * $temperature +
+        (15 / 37.0) * [Math]::Pow([Math]::Max(0.0, $wind) + 1, 0.16) * ($temperature - 37)
+    $heat = $temperature
+    if ($temperature -gt 14.5) {
+        $heat = $temperature + (Get-SummerSimmer $temperature $humidity) - (Get-SummerSimmer $temperature 50)
     }
-    if ($temperature -ge 27 -and $humidity -ge 40) {
-        $f = $temperature * 9 / 5 + 32
-        $h = $humidity
-        $index = -42.379 + 2.04901523 * $f + 10.14333127 * $h - 0.22475541 * $f * $h -
-            0.00683783 * $f * $f - 0.05481717 * $h * $h + 0.00122874 * $f * $f * $h +
-            0.00085282 * $f * $h * $h - 0.00000199 * $f * $f * $h * $h
-        return ($index - 32) * 5 / 9
-    }
-    return $temperature
+    return $temperature + ($chill - $temperature) + ($heat - $temperature)
 }
 
 # Turns FMI's answer (XML) into the same shape as Open-Meteo's "current"
@@ -3386,7 +3389,10 @@ function ConvertFrom-FmiForecast([string]$text, $city) {
     if ($values.ContainsKey('WindSpeedMS')) { $wind = [double]$values['WindSpeedMS'] }
     if ($values.ContainsKey('Humidity')) { $humidity = [double]$values['Humidity'] }
     $feels = $temperature
-    if ($null -ne $wind) {
+    if ($values.ContainsKey('FeelsLike')) {
+        $feels = [double]$values['FeelsLike']   # FMI's own value
+    }
+    elseif ($null -ne $wind) {
         $h = 50.0
         if ($null -ne $humidity) { $h = $humidity }
         $feels = Get-FeelsLike $temperature $wind $h
@@ -3421,7 +3427,103 @@ function ConvertFrom-FmiForecast([string]$text, $city) {
         interval             = 3600
         description          = $description
         level                = $level
+        feels_from_fmi       = $values.ContainsKey('FeelsLike')
     }
+}
+
+# ---- Measurements from FMI weather stations ------------------------------
+# ilmatieteenlaitos.fi shows the latest station measurements for the current
+# temperature, humidity and wind, so the widget does too: from the nearest
+# station within 25 km that has measured that value in the last 90 minutes.
+# The condition, icon and precipitation still come from the forecast.
+
+$script:fmiObsTask = $null
+$script:obsInfo = $null   # "measured N km away" for the tooltip
+
+function Get-FmiObservationUrl($city) {
+    $lat = [double]$city.Latitude
+    $lon = [double]$city.Longitude
+    $box = [string]::Format($script:invariant, '{0:0.####},{1:0.####},{2:0.####},{3:0.####}',
+        $lon - 0.45, $lat - 0.22, $lon + 0.45, $lat + 0.22)
+    $since = [DateTime]::UtcNow.AddMinutes(-90).ToString('yyyy-MM-ddTHH:mm:00Z', $script:invariant)
+    return 'https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0&request=getFeature' +
+        '&storedquery_id=fmi::observations::weather::simple' +
+        "&bbox=$box&timestep=10&starttime=$since&parameters=t2m,rh,ws_10min"
+}
+
+function Get-DistanceKm([double]$lat1, [double]$lon1, [double]$lat2, [double]$lon2) {
+    $rad = [Math]::PI / 180
+    $dLat = ($lat2 - $lat1) * $rad
+    $dLon = ($lon2 - $lon1) * $rad
+    $a = [Math]::Sin($dLat / 2) * [Math]::Sin($dLat / 2) +
+        [Math]::Cos($lat1 * $rad) * [Math]::Cos($lat2 * $rad) * [Math]::Sin($dLon / 2) * [Math]::Sin($dLon / 2)
+    return 6371 * 2 * [Math]::Atan2([Math]::Sqrt($a), [Math]::Sqrt(1 - $a))
+}
+
+# Latest valid measurement of each value from the nearest station that has
+# it. Returns @{ t2m = @{ Value; Km }; rh = ...; ws_10min = ... } (each
+# entry only if found).
+function ConvertFrom-FmiObservations([string]$text, $city) {
+    $xml = [xml]$text
+    $latest = @{}   # "position|parameter" -> @{ Time; Value; Position }
+    foreach ($item in $xml.SelectNodes("//*[local-name()='BsWfsElement']")) {
+        $position = $item.SelectSingleNode(".//*[local-name()='pos']").InnerText.Trim()
+        $name = $item.SelectSingleNode("*[local-name()='ParameterName']").InnerText
+        $valueText = $item.SelectSingleNode("*[local-name()='ParameterValue']").InnerText
+        $number = 0.0
+        if (-not [double]::TryParse($valueText, [Globalization.NumberStyles]::Float, $script:invariant, [ref]$number) -or
+            [double]::IsNaN($number)) { continue }
+        $time = [DateTime]::Parse($item.SelectSingleNode("*[local-name()='Time']").InnerText,
+            $script:invariant, [Globalization.DateTimeStyles]::AdjustToUniversal)
+        $key = "$position|$name"
+        if (-not $latest.ContainsKey($key) -or $latest[$key].Time -lt $time) {
+            $latest[$key] = @{ Time = $time; Value = $number; Position = $position }
+        }
+    }
+
+    $result = @{}
+    $oldest = [DateTime]::UtcNow.AddMinutes(-90)
+    foreach ($entry in $latest.GetEnumerator()) {
+        $name = ($entry.Key -split '\|')[1]
+        $found = $entry.Value
+        if ($found.Time -lt $oldest) { continue }
+        $parts = $found.Position -split '\s+'
+        $km = Get-DistanceKm ([double]$city.Latitude) ([double]$city.Longitude) `
+            ([double]::Parse($parts[0], $script:invariant)) ([double]::Parse($parts[1], $script:invariant))
+        if ($km -gt 25) { continue }
+        if (-not $result.ContainsKey($name) -or $result[$name].Km -gt $km) {
+            $result[$name] = @{ Value = $found.Value; Km = $km }
+        }
+    }
+    return $result
+}
+
+# Puts the measured values into the forecast-based weather.
+function Merge-FmiObservations($current, [hashtable]$measured) {
+    $script:obsInfo = $null
+    if ($null -eq $measured -or $measured.Count -eq 0) { return }
+
+    $forecastTemperature = [double]$current.temperature_2m
+    if ($measured.ContainsKey('t2m')) { $current.temperature_2m = $measured['t2m'].Value }
+    if ($measured.ContainsKey('rh')) { $current.relative_humidity_2m = $measured['rh'].Value }
+    if ($measured.ContainsKey('ws_10min')) { $current.wind_speed_10m = $measured['ws_10min'].Value }
+
+    if ($current.feels_from_fmi) {
+        # FMI's own "feels like", moved by the measured temperature difference.
+        $current.apparent_temperature = [double]$current.apparent_temperature +
+            ([double]$current.temperature_2m - $forecastTemperature)
+    }
+    elseif ($null -ne $current.wind_speed_10m) {
+        $h = 50.0
+        if ($null -ne $current.relative_humidity_2m) { $h = [double]$current.relative_humidity_2m }
+        $current.apparent_temperature = Get-FeelsLike ([double]$current.temperature_2m) `
+            ([double]$current.wind_speed_10m) $h
+    }
+
+    $nearest = 99.0
+    foreach ($found in $measured.Values) { $nearest = [Math]::Min($nearest, [double]$found.Km) }
+    $script:obsInfo = [string]::Format($script:invariant,
+        'Temperature, humidity and wind measured at an FMI station {0:0} km away.', [Math]::Max(1, $nearest))
 }
 
 function Get-WeatherCredit {
@@ -3448,9 +3550,12 @@ function Start-Weather {
     $lat = ([double]$script:weatherCity.Latitude).ToString($script:invariant)
     $lon = ([double]$script:weatherCity.Longitude).ToString($script:invariant)
 
+    $script:fmiObsTask = $null
     if (Test-UseFmi $script:weatherCity) {
         $script:weatherSource = 'FMI'
         $url = Get-FmiUrl $lat $lon
+        try { $script:fmiObsTask = $script:http.GetStringAsync((Get-FmiObservationUrl $script:weatherCity)) }
+        catch { Write-Log "FMI station request could not start: $($_.Exception.Message)" }
     }
     else {
         $script:weatherSource = 'Open-Meteo'
@@ -3473,6 +3578,9 @@ function Start-Weather {
 function Complete-Weather {
     if ($null -eq $script:weatherTask) { return }
     if (-not $script:weatherTask.IsCompleted) { return }
+    if ($null -ne $script:fmiObsTask -and -not $script:fmiObsTask.IsCompleted) { return }
+    $obsTask = $script:fmiObsTask
+    $script:fmiObsTask = $null
 
     $task = $script:weatherTask
     $script:weatherTask = $null
@@ -3492,6 +3600,16 @@ function Complete-Weather {
         $json = $task.GetAwaiter().GetResult()
         if ($script:weatherSource -eq 'FMI') {
             $current = ConvertFrom-FmiForecast $json $script:weatherCity
+            $measured = $null
+            if ($null -ne $obsTask) {
+                try {
+                    $measured = ConvertFrom-FmiObservations ($obsTask.GetAwaiter().GetResult()) $script:weatherCity
+                }
+                catch {
+                    Write-Log "FMI station measurements unavailable, using the forecast: $(Get-ErrorText $_.Exception)"
+                }
+            }
+            Merge-FmiObservations $current $measured
         }
         else {
             $current = (ConvertFrom-Json -InputObject $json).current
@@ -3559,7 +3677,12 @@ function Complete-Weather {
     catch {
         $message = Get-ErrorText $_.Exception
         if ($script:weatherSource -eq 'FMI') {
-            if (-not $script:fmiPlainQuery -and $message -match '400') {
+            if ($script:fmiAskFeels -and $message -match '400') {
+                # FMI refused the request: ask again without its FeelsLike value.
+                $script:fmiAskFeels = $false
+                Write-Log "FMI refused FeelsLike, retrying without it: $message"
+            }
+            elseif (-not $script:fmiPlainQuery -and $message -match '400') {
                 # FMI refused the time window: ask again without it.
                 $script:fmiPlainQuery = $true
                 Write-Log "FMI refused the time window, retrying without it: $message"
