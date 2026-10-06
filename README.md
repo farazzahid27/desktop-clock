@@ -48,7 +48,9 @@ bypass a policy set by your organisation.
   gear -> Size.
 - **Settings and close:** hover the top-right corner, right-click the
   widget, or use the tray icon.
-- **Refresh weather:** the circular arrow next to "Updated ...".
+- **Refresh weather:** hover the bottom line of the widget to show
+  "Updated ..." and click the circular arrow next to it. (The line stays
+  visible on its own if the weather is out of date or a refresh failed.)
 
 ## Updates
 
@@ -61,7 +63,9 @@ installed until you confirm; the previous version is kept as
 
 - Weather: `api.open-meteo.com` every 15 minutes (city coordinates only).
 - City search: `geocoding-api.open-meteo.com`, only while searching.
-- Update check: `api.github.com` once a day (can be turned off).
+- Update check: this repository's release page on `github.com` once a
+  day (can be turned off); updates are downloaded from
+  `raw.githubusercontent.com` only after you confirm.
 
 The program copy, settings and a small log are stored in
 `%LOCALAPPDATA%\DesktopClock`.
