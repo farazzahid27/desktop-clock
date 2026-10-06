@@ -34,7 +34,7 @@
 
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     $mode = $ExecutionContext.SessionState.LanguageMode
-    $message = "Desktop Clock needs PowerShell FullLanguage mode, but this " +
+    $message = "Desktop Clock & Weather needs PowerShell FullLanguage mode, but this " +
         "session runs in $mode mode (set by your organization). Ask IT " +
         "whether this script can be approved; do not try to bypass it."
     try {
@@ -58,8 +58,263 @@ Add-Type -AssemblyName System.Windows.Forms
 # ---- Version and update source --------------------------------------------
 # Raise AppVersion before publishing a new GitHub release with a higher tag
 # (e.g. AppVersion 1.1.0 -> release tag v1.1.0).
-$script:AppVersion = [version]'1.0.2'
+$script:AppVersion = [version]'1.0.3'
 $script:UpdateRepo = 'farazzahid27/desktop-clock'
+# Name shown to users. File, folder and repository names stay "DesktopClock"
+# so updates and settings keep working.
+$script:AppName = 'Desktop Clock & Weather'
+
+# ------------------------------------------------------------
+# Dialogs: one consistent, Windows 11-style look for every message
+# (welcome, updates, errors, uninstall). Follows the Windows light/dark
+# app setting. Falls back to a plain message box if anything fails.
+# ------------------------------------------------------------
+
+$script:dialogXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        ResizeMode="NoResize" SizeToContent="Height" Width="472"
+        Topmost="True" ShowInTaskbar="True" WindowStartupLocation="CenterScreen"
+        FontFamily="Segoe UI" UseLayoutRounding="True">
+    <Window.Resources>
+        <Style x:Key="DialogButton" TargetType="Button">
+            <Setter Property="MinWidth" Value="96"/>
+            <Setter Property="Padding" Value="16,7"/>
+            <Setter Property="Margin" Value="8,0,0,0"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Box" CornerRadius="6"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Box" Property="Opacity" Value="0.88"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Box" Property="Opacity" Value="0.75"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Box" Property="BorderThickness" Value="2"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+    <Border x:Name="Frame" Margin="16" CornerRadius="10" BorderThickness="1" Padding="22,20,22,18">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="20" ShadowDepth="3" Direction="270" Opacity="0.3" Color="Black"/>
+        </Border.Effect>
+        <StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Grid Width="36" Height="36" VerticalAlignment="Center">
+                    <Ellipse x:Name="Badge"/>
+                    <Path x:Name="Glyph" StrokeThickness="2.4"
+                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                </Grid>
+                <StackPanel Grid.Column="1" Margin="14,0,0,0" VerticalAlignment="Center">
+                    <TextBlock x:Name="TitleText" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="SubtitleText" FontSize="12" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                </StackPanel>
+            </Grid>
+            <TextBlock x:Name="MessageText" FontSize="14" TextWrapping="Wrap" Margin="50,12,0,0"/>
+            <TextBlock x:Name="NoteText" FontSize="12" TextWrapping="Wrap" Margin="50,8,0,0"/>
+            <StackPanel x:Name="ButtonRow" Orientation="Horizontal"
+                        HorizontalAlignment="Right" Margin="0,20,0,0"/>
+        </StackPanel>
+    </Border>
+</Window>
+'@
+
+function Test-LightApps {
+    try {
+        $value = Get-ItemPropertyValue -ErrorAction Stop -Name AppsUseLightTheme `
+            -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+        return [int]$value -ne 0
+    }
+    catch { return $true }
+}
+
+function ConvertTo-DialogBrush([string]$color) {
+    $brush = (New-Object Windows.Media.BrushConverter).ConvertFromString($color)
+    $brush.Freeze()
+    return $brush
+}
+
+# Returns the label of the button that was clicked ('' if closed with Esc).
+#   -Kind     App (clock), Warning or Error: the badge next to the title
+#   -Danger   the primary button is destructive: red, and not the Enter key
+#   -Toast    small, non-blocking card in the bottom-right corner that
+#             closes itself after -Seconds; its primary button opens -Link
+function Show-AppDialog {
+    param(
+        [string]$Title,
+        [string]$Message = '',
+        [string]$Note = '',
+        [string]$Subtitle = '',
+        [string[]]$Buttons = @('OK'),
+        [string]$Primary = '',
+        [ValidateSet('App','Warning','Error')][string]$Kind = 'App',
+        [switch]$Danger,
+        [switch]$Toast,
+        [int]$Seconds = 15,
+        [string]$Link = ''
+    )
+    if (-not $Subtitle) { $Subtitle = "$($script:AppName) $([char]0x00B7) version $($script:AppVersion)" }
+    if (-not $Primary) { $Primary = $Buttons[-1] }
+
+    try {
+        $dialog = [Windows.Markup.XamlReader]::Parse($script:dialogXaml)
+        $dialog.Title = $script:AppName
+
+        if (Test-LightApps) {
+            $bg = '#FFFFFFFF'; $edge = '#FFD6D6D6'; $fg = '#FF1B1B1B'; $body = '#FF2B2B2B'
+            $muted = '#FF6B6B6B'; $buttonBg = '#FFF5F5F5'; $buttonEdge = '#FFCCCCCC'
+        }
+        else {
+            $bg = '#FF2B2B2B'; $edge = '#FF454545'; $fg = '#FFFFFFFF'; $body = '#FFE4E4E4'
+            $muted = '#FFA3A3A3'; $buttonBg = '#FF3A3A3A'; $buttonEdge = '#FF555555'
+        }
+        $accent = '#FF2F6FEB'
+        if ($Danger) { $accent = '#FFC42B1C' }
+
+        switch ($Kind) {
+            'Warning' { $badge = '#FFE3A008'; $mark = '#FF1B1B1B'; $shape = 'M 18,10 L 18,20 M 18,25.6 L 18,25.8' }
+            'Error'   { $badge = '#FFC42B1C'; $mark = '#FFFFFFFF'; $shape = 'M 13.5,13.5 L 22.5,22.5 M 22.5,13.5 L 13.5,22.5' }
+            default   { $badge = '#FF2F6FEB'; $mark = '#FFFFFFFF'; $shape = 'M 18,18 L 18,10.5 M 18,18 L 23.5,21' }
+        }
+
+        $frame = $dialog.FindName('Frame')
+        $frame.Background = ConvertTo-DialogBrush $bg
+        $frame.BorderBrush = ConvertTo-DialogBrush $edge
+        $dialog.FindName('Badge').Fill = ConvertTo-DialogBrush $badge
+        $glyph = $dialog.FindName('Glyph')
+        $glyph.Stroke = ConvertTo-DialogBrush $mark
+        $glyph.Data = [Windows.Media.Geometry]::Parse($shape)
+
+        $titleText = $dialog.FindName('TitleText')
+        $titleText.Text = $Title
+        $titleText.Foreground = ConvertTo-DialogBrush $fg
+        $subtitleText = $dialog.FindName('SubtitleText')
+        $subtitleText.Text = $Subtitle
+        $subtitleText.Foreground = ConvertTo-DialogBrush $muted
+        $messageText = $dialog.FindName('MessageText')
+        $messageText.Text = $Message
+        $messageText.Foreground = ConvertTo-DialogBrush $body
+        if (-not $Message) { $messageText.Visibility = 'Collapsed' }
+        $noteText = $dialog.FindName('NoteText')
+        $noteText.Text = $Note
+        $noteText.Foreground = ConvertTo-DialogBrush $muted
+        if (-not $Note) { $noteText.Visibility = 'Collapsed' }
+
+        $row = $dialog.FindName('ButtonRow')
+        $style = $dialog.Resources['DialogButton']
+        foreach ($label in $Buttons) {
+            $button = New-Object Windows.Controls.Button
+            $button.Style = $style
+            $button.Content = $label
+            $button.Tag = $label
+            if ($label -eq $Primary) {
+                $button.Background = ConvertTo-DialogBrush $accent
+                $button.BorderBrush = ConvertTo-DialogBrush $accent
+                $button.Foreground = ConvertTo-DialogBrush '#FFFFFFFF'
+                if (-not $Danger) { $button.IsDefault = $true }
+                if ($Link) { $button.CommandParameter = $Link }
+            }
+            else {
+                $button.Background = ConvertTo-DialogBrush $buttonBg
+                $button.BorderBrush = ConvertTo-DialogBrush $buttonEdge
+                $button.Foreground = ConvertTo-DialogBrush $fg
+                if ($Danger) { $button.IsDefault = $true }
+            }
+            $button.Add_Click({
+                param($sender, $e)
+                $owner = [Windows.Window]::GetWindow($sender)
+                if ($sender.CommandParameter) {
+                    try { Start-Process ([string]$sender.CommandParameter) } catch {}
+                }
+                $owner.Tag = [string]$sender.Tag
+                $owner.Close()
+            })
+            [void]$row.Children.Add($button)
+        }
+
+        $dialog.Add_PreviewKeyDown({
+            param($sender, $e)
+            if ($e.Key -eq [Windows.Input.Key]::Escape) { $sender.Close() }
+        })
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            try { $sender.DragMove() } catch {}
+        })
+
+        if ($Toast) {
+            $dialog.Width = 412
+            $dialog.ShowInTaskbar = $false
+            $dialog.ShowActivated = $false
+            $dialog.WindowStartupLocation = [Windows.WindowStartupLocation]::Manual
+            $dialog.Add_Loaded({
+                param($sender, $e)
+                $area = [Windows.SystemParameters]::WorkArea
+                $sender.Left = $area.Right - $sender.ActualWidth + 4
+                $sender.Top = $area.Bottom - $sender.ActualHeight + 4
+            })
+            $timer = New-Object Windows.Threading.DispatcherTimer
+            $timer.Interval = [TimeSpan]::FromSeconds([Math]::Max(3, $Seconds))
+            $timer.Tag = $dialog
+            $timer.Add_Tick({
+                param($sender, $e)
+                $sender.Stop()
+                try { $sender.Tag.Close() } catch {}
+            })
+            $dialog.Show()
+            $timer.Start()
+            return ''
+        }
+
+        [void]$dialog.ShowDialog()
+        return [string]$dialog.Tag
+    }
+    catch {
+        if ($Toast) { return '' }
+        $text = $Message
+        if ($Note) { $text += "`n`n$Note" }
+        if ($Buttons.Count -gt 1) {
+            $answer = [Windows.MessageBox]::Show($text, $Title, 'OKCancel')
+            if ($answer -eq 'OK') { return $Primary }
+            return ''
+        }
+        [void][Windows.MessageBox]::Show($text, $Title)
+        return $Buttons[0]
+    }
+}
+
+# Closes a running copy of the widget (used when a newer version is
+# installed by running the downloaded file). Only this user's processes.
+function Stop-RunningWidget {
+    try {
+        $running = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction Stop |
+            Where-Object { $_.ProcessId -ne $PID -and
+                $_.CommandLine -like "*$($script:installedScript)*" })
+        foreach ($process in $running) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
+        if ($running.Count -gt 0) { Start-Sleep -Milliseconds 800 }
+    }
+    catch {}
+}
 
 # ------------------------------------------------------------
 # Self-install: one per-user copy in %LOCALAPPDATA%\DesktopClock\App
@@ -117,23 +372,34 @@ if ($PSCommandPath -and -not $script:isInstalledCopy) {
             ($installedVersion -eq $script:AppVersion -and $installedText -cne $thisText)
 
         if ($install) {
+            # A running older copy is closed so the new version starts at once.
+            if ($null -ne $installedText) { Stop-RunningWidget }
             [void][IO.Directory]::CreateDirectory($script:installFolder)
             [IO.File]::WriteAllText($script:installedScript, $thisText,
                 (New-Object Text.UTF8Encoding -ArgumentList $false))
-            $installNote = "Desktop Clock v$($script:AppVersion) is installed for your account in:`n" +
-                "$($script:installFolder)`n`n" +
-                'It now runs from there (also at sign-in, from the Start menu and for updates), ' +
-                'so the downloaded files are no longer needed and can be deleted.'
         }
     }
     catch {
-        [void][Windows.MessageBox]::Show(
-            "Desktop Clock could not be installed:`n`n$($_.Exception.Message)", 'Desktop Clock')
+        [void](Show-AppDialog -Kind Error -Title 'Installation failed' `
+            -Message "$($script:AppName) could not be installed for your account." `
+            -Note $_.Exception.Message -Buttons @('Close'))
         return
     }
 
     Start-ScriptHidden $script:installedScript
-    if ($installNote) { [void][Windows.MessageBox]::Show($installNote, 'Desktop Clock') }
+    if ($install -and $null -eq $installedText) {
+        [void](Show-AppDialog -Title "$($script:AppName) is ready" `
+            -Message ('It is now running on your desktop. Right-click the widget or its tray icon ' +
+                'to choose your city and adjust the settings.') `
+            -Note ('Installed for your account only, so no administrator rights were needed. ' +
+                'You can delete the downloaded file.') `
+            -Buttons @('Get started'))
+    }
+    elseif ($install) {
+        [void](Show-AppDialog -Title "Updated to version $($script:AppVersion)" `
+            -Message "$($script:AppName) has been updated and restarted. Your settings, city and position are unchanged." `
+            -Note 'You can delete the downloaded file.')
+    }
     return
 }
 
@@ -146,8 +412,9 @@ $script:mutex = [Threading.Mutex]::new(
     $false, 'Local\DesktopClockWidget', [ref]$script:createdNew)
 
 if (-not $script:createdNew) {
-    [void][Windows.MessageBox]::Show(
-        'Desktop Clock is already running.', 'Desktop Clock')
+    [void](Show-AppDialog -Title 'Already running' `
+        -Message ("$($script:AppName) is already on your desktop. Use its tray icon to show it " +
+            'for a moment, open the settings or close it.'))
     $script:mutex.Dispose()
     return
 }
@@ -223,6 +490,40 @@ public static class DesktopClockNative
 
     [DllImport("user32.dll")]
     public static extern bool DestroyIcon(IntPtr icon);
+
+    [DllImport("user32.dll")]
+    static extern short GetAsyncKeyState(int key);
+
+    [DllImport("user32.dll")]
+    static extern IntPtr WindowFromPoint(POINT point);
+
+    [DllImport("user32.dll")]
+    static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+
+    [DllImport("user32.dll")]
+    static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    static readonly uint OwnProcessId = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+
+    // True while a mouse button is held down anywhere except on this
+    // program's own popups (the open menu and its submenus). Used to close
+    // the widget's menu, which Windows does not close by itself because the
+    // widget never takes focus.
+    public static bool PressedOutsideMenus(IntPtr widget) {
+        bool down = (GetAsyncKeyState(0x01) & 0x8000) != 0 ||   // left
+                    (GetAsyncKeyState(0x02) & 0x8000) != 0 ||   // right
+                    (GetAsyncKeyState(0x04) & 0x8000) != 0;     // middle
+        if (!down) return false;
+
+        POINT point;
+        if (!GetCursorPos(out point)) return false;
+        IntPtr root = GetAncestor(WindowFromPoint(point), 2);   // GA_ROOT
+        if (root == IntPtr.Zero || root == widget) return true;
+
+        uint processId;
+        GetWindowThreadProcessId(root, out processId);
+        return processId != OwnProcessId;
+    }
 
     const uint SWP_NOSIZE = 0x0001;
     const uint SWP_NOMOVE = 0x0002;
@@ -728,7 +1029,10 @@ $script:settingsFolder = Join-Path $env:LOCALAPPDATA 'DesktopClock'
 $script:settingsFile = Join-Path $script:settingsFolder 'settings.json'
 $script:logFile = Join-Path $script:settingsFolder 'widget.log'
 $script:startupLink = Join-Path `
-    ([Environment]::GetFolderPath('Startup')) 'Desktop Clock.lnk'
+    ([Environment]::GetFolderPath('Startup')) "$($script:AppName).lnk"
+# Shortcut names used before the rename (replaced automatically).
+$script:oldStartupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Desktop Clock.lnk'
+$script:oldStartMenuLink = Join-Path ([Environment]::GetFolderPath('Programs')) 'Desktop Clock.lnk'
 
 $script:logSeen = @{}
 
@@ -784,6 +1088,8 @@ $script:config = @{
     Use24h          = $true
     StartMenu       = $true
     LastUpdateCheck = $null
+    UpdatedFrom     = $null    # set just before an automatic update restarts the widget
+    NotifiedVersion = $null    # update already announced (when it could not install)
     AnimateIcons    = $true
     Positions   = $null   # per layout: @{ Wide = @{...}; Narrow = @{...} }
 }
@@ -949,6 +1255,7 @@ $script:updateTask = $null
 $script:updateManual = $false
 $script:updateInfo = $null
 $script:updateDownloadTask = $null
+$script:downloadManual = $false
 $script:notifiedVersion = $null
 $script:nextUpdateCheck = (Get-Date).AddMinutes(2)
 try {
@@ -990,7 +1297,7 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Desktop Clock"
+        Title="Desktop Clock &amp; Weather"
         Width="520" Height="160"
         WindowStyle="None"
         ResizeMode="NoResize"
@@ -3313,7 +3620,7 @@ function Save-LauncherShortcut([string]$linkPath) {
         $icon = Get-LauncherIcon
         if ($icon) { $shortcut.IconLocation = "$icon,0" }
         $shortcut.WindowStyle = 7
-        $shortcut.Description = 'Desktop Clock and Weather'
+        $shortcut.Description = $script:AppName
         $shortcut.Save()
     }
     finally {
@@ -3326,7 +3633,7 @@ function Set-Startup([bool]$enabled) {
     elseif (Test-Path $script:startupLink) { Remove-Item $script:startupLink -Force }
 }
 
-$script:startMenuLink = Join-Path ([Environment]::GetFolderPath('Programs')) 'Desktop Clock.lnk'
+$script:startMenuLink = Join-Path ([Environment]::GetFolderPath('Programs')) "$($script:AppName).lnk"
 
 function Set-StartMenu([bool]$enabled) {
     if ($enabled) { Save-LauncherShortcut $script:startMenuLink }
@@ -3337,6 +3644,18 @@ function Set-StartMenu([bool]$enabled) {
 # created by an older version that ran from another folder).
 function Update-Shortcuts {
     if (-not $script:isInstalledCopy) { return }
+    # Shortcuts from before the rename: replace them with the new name,
+    # keeping launch at sign-in if it was on.
+    try {
+        if (Test-Path -LiteralPath $script:oldStartupLink) {
+            Remove-Item -LiteralPath $script:oldStartupLink -Force
+            Set-Startup $true
+        }
+        if (Test-Path -LiteralPath $script:oldStartMenuLink) {
+            Remove-Item -LiteralPath $script:oldStartMenuLink -Force
+        }
+    }
+    catch { Write-Log "Old shortcut cleanup failed: $($_.Exception.Message)" }
     try { if (Test-Path $script:startupLink) { Set-Startup $true } }
     catch { Write-Log "Startup shortcut refresh failed: $($_.Exception.Message)" }
     try { Set-StartMenu ([bool]$script:config.StartMenu) }
@@ -3344,15 +3663,17 @@ function Update-Shortcuts {
 }
 
 function Uninstall-Widget {
-    $answer = [Windows.MessageBox]::Show(
-        "Remove Desktop Clock from this account?`n`n" +
-        "This closes the widget and deletes its program copy, settings, log and " +
-        "shortcuts (folder $($script:settingsFolder)).",
-        'Uninstall Desktop Clock', 'YesNo', 'Warning')
-    if ($answer -ne 'Yes') { return }
+    $answer = Show-AppDialog -Kind Warning -Danger -Title "Uninstall $($script:AppName)?" `
+        -Message ('The widget closes and is removed from this account, together with its ' +
+            'settings, log and shortcuts.') `
+        -Note "Folder: $($script:settingsFolder)" -Buttons @('Cancel', 'Uninstall') -Primary 'Uninstall'
+    if ($answer -ne 'Uninstall') { return }
 
     try { Set-Startup $false } catch {}
     try { Set-StartMenu $false } catch {}
+    foreach ($old in @($script:oldStartupLink, $script:oldStartMenuLink)) {
+        try { if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force } } catch {}
+    }
     $script:uninstalling = $true
     $window.Close()   # the folder is deleted after the window has closed
 }
@@ -3380,6 +3701,64 @@ function Start-UpdateCheck([switch]$Manual) {
     catch {
         Write-Log "Update check could not start: $($_.Exception.Message)"
     }
+}
+
+# Updates install on their own, with no questions, unless something on this
+# PC says they should not. Returns $null when allowed, otherwise the reason.
+# Administrators can turn automatic updates off with the registry value
+#   HKLM\Software\Policies\DesktopClock  DisableAutoUpdate (DWORD) = 1
+# (or the same under HKCU for one user).
+function Get-UpdatePolicy {
+    foreach ($root in @('HKLM:', 'HKCU:')) {
+        try {
+            $value = Get-ItemPropertyValue -Path "$root\Software\Policies\DesktopClock" `
+                -Name DisableAutoUpdate -ErrorAction Stop
+            if ([int]$value -ne 0) { return 'Updates on this PC are managed by your organisation.' }
+        }
+        catch {}
+    }
+    foreach ($scope in @('MachinePolicy', 'UserPolicy')) {
+        try {
+            if ((Get-ExecutionPolicy -Scope $scope) -in @('AllSigned', 'Restricted')) {
+                return 'Scripts on this PC are managed by your organisation.'
+            }
+        }
+        catch {}
+    }
+    if (-not $script:scriptPath -or -not (Test-Path -LiteralPath $script:scriptPath)) {
+        return 'The widget is not running from its installed copy.'
+    }
+    try {
+        $probe = Join-Path (Split-Path $script:scriptPath -Parent) '.update-test'
+        [IO.File]::WriteAllText($probe, 'ok')
+        Remove-Item -LiteralPath $probe -Force
+    }
+    catch {
+        return 'The program folder cannot be changed on this PC.'
+    }
+    return $null
+}
+
+# Tells the user about an update that cannot be installed automatically:
+# a dialog when they asked, otherwise a corner notification once per version.
+function Show-UpdateBlocked([string]$reason, [switch]$Manual) {
+    $info = $script:updateInfo
+    if ($null -eq $info) { return }
+    $subtitle = "Version $($info.Version) $([char]0x00B7) you have $($script:AppVersion)"
+    $message = "$reason $($script:AppName) will not install it automatically. " +
+        'Contact your IT team if you need the new version.'
+
+    if ($Manual) {
+        [void](Show-AppDialog -Title 'Update available' -Subtitle $subtitle -Message $message `
+            -Buttons @('Close', 'View release notes') -Primary 'View release notes' -Link $info.Page)
+        return
+    }
+    if ([string]$script:config.NotifiedVersion -eq [string]$info.Version) { return }
+    $script:config.NotifiedVersion = [string]$info.Version
+    Save-Settings
+    [void](Show-AppDialog -Toast -Seconds 20 -Title 'Update available' -Subtitle $subtitle `
+        -Message $message -Buttons @('View release notes', 'Dismiss') -Primary 'View release notes' `
+        -Link $info.Page)
 }
 
 function Complete-UpdateCheck {
@@ -3411,8 +3790,10 @@ function Complete-UpdateCheck {
             $script:updateInfo = $null
             Update-UpdateMenus
             if ($manual) {
-                [void][Windows.MessageBox]::Show(
-                    "You have the latest version (v$($script:AppVersion)).", 'Desktop Clock')
+                $note = 'Updates are checked and installed automatically once a day.'
+                if (-not $script:config.UpdateChecks) { $note = 'Automatic updates are turned off in the Updates menu.' }
+                [void](Show-AppDialog -Title "You're up to date" `
+                    -Message "You have the latest version of $($script:AppName)." -Note $note)
             }
             return
         }
@@ -3426,16 +3807,7 @@ function Complete-UpdateCheck {
         }
         Update-UpdateMenus
         Write-Log "Update available: v$latest"
-
-        if ($manual) {
-            Install-Update
-        }
-        elseif ($null -ne $script:tray -and $script:notifiedVersion -ne $latest) {
-            $script:notifiedVersion = $latest
-            $script:tray.ShowBalloonTip(8000, 'Desktop Clock',
-                "Version $latest is available. Right-click this icon or open Settings to update.",
-                [Windows.Forms.ToolTipIcon]::Info)
-        }
+        Install-Update -Manual:$manual
     }
     catch {
         $message = Get-ErrorText $_.Exception
@@ -3447,7 +3819,8 @@ function Complete-UpdateCheck {
         $script:nextUpdateCheck = (Get-Date).AddHours(6)
         Write-Log "Update check failed: $message"
         if ($manual) {
-            [void][Windows.MessageBox]::Show("Could not check for updates.`n`n$message", 'Desktop Clock')
+            [void](Show-AppDialog -Kind Warning -Title "Couldn't check for updates" -Message $message `
+                -Note 'Check your internet connection and try again later.')
         }
     }
 }
@@ -3468,29 +3841,30 @@ function Update-UpdateMenus {
     }
 }
 
-function Install-Update {
+# Downloads and installs the update without asking. The widget then
+# restarts and shows a short "Updated" notification.
+function Install-Update([switch]$Manual) {
     $info = $script:updateInfo
     if ($null -eq $info -or $null -ne $script:updateDownloadTask) { return }
 
-    if (-not $script:scriptPath -or -not (Test-Path -LiteralPath $script:scriptPath)) {
-        [void][Windows.MessageBox]::Show('Run the widget from its .ps1 file to update it.', 'Desktop Clock')
+    $reason = Get-UpdatePolicy
+    if ($null -ne $reason) {
+        Write-Log "Update v$($info.Version) not installed automatically: $reason"
+        Show-UpdateBlocked $reason -Manual:$Manual
         return
     }
 
-    $notes = "`n`nWhat's new: $($info.Page)"
-
-    $answer = [Windows.MessageBox]::Show(
-        "Update Desktop Clock from v$($script:AppVersion) to v$($info.Version)?$notes`n`n" +
-        'The widget will restart. Your settings are kept.',
-        'Desktop Clock update', 'YesNo', 'Question')
-    if ($answer -ne 'Yes') { return }
-
+    $script:downloadManual = [bool]$Manual
     try {
         $script:updateDownloadTask = $script:http.GetStringAsync($info.Url)
         Write-Log "Downloading v$($info.Version) from $($info.Url)"
     }
     catch {
-        [void][Windows.MessageBox]::Show("Download failed: $($_.Exception.Message)", 'Desktop Clock')
+        Write-Log "Update download could not start: $($_.Exception.Message)"
+        if ($Manual) {
+            [void](Show-AppDialog -Kind Error -Title "The update couldn't be downloaded" `
+                -Message (Get-ErrorText $_.Exception) -Note 'The widget will try again later.')
+        }
     }
 }
 
@@ -3521,12 +3895,16 @@ function Complete-UpdateDownload {
         [IO.File]::Replace($temp, $current, $backup)
 
         Write-Log "Updated from v$($script:AppVersion) to v$($script:updateInfo.Version); previous version kept as $backup"
+        $script:config.UpdatedFrom = [string]$script:AppVersion   # the new copy shows "Updated"
         Restart-Widget
     }
     catch {
         $message = Get-ErrorText $_.Exception
         Write-Log "Update failed: $message"
-        [void][Windows.MessageBox]::Show("The update was not installed.`n`n$message", 'Desktop Clock')
+        if ($script:downloadManual) {
+            [void](Show-AppDialog -Kind Error -Title 'The update was not installed' -Message $message `
+                -Note 'Your current version keeps working. The widget will try again later.')
+        }
     }
 }
 
@@ -3537,6 +3915,19 @@ function Restart-Widget {
     $script:mutex.Dispose()
     Start-ScriptHidden $script:scriptPath
     $window.Close()
+}
+
+# After an automatic update: a short notification in the corner.
+function Show-UpdatedNotice {
+    $from = [string]$script:config.UpdatedFrom
+    if (-not $from) { return }
+    $script:config.UpdatedFrom = $null
+    Save-Settings
+    if ($from -eq [string]$script:AppVersion) { return }
+    [void](Show-AppDialog -Toast -Seconds 15 -Title "Updated to version $($script:AppVersion)" `
+        -Message "$($script:AppName) was updated automatically. Your settings are unchanged." `
+        -Buttons @("What's new", 'Dismiss') -Primary "What's new" `
+        -Link "https://github.com/$($script:UpdateRepo)/releases/tag/v$($script:AppVersion)")
 }
 
 $script:fadeDuration = New-Object Windows.Duration -ArgumentList ([TimeSpan]::FromMilliseconds(120))
@@ -3655,9 +4046,8 @@ $startupMenu = New-MenuItem 'Launch at Windows sign-in' {
     catch {
         $startupMenu.IsChecked = Test-Path $script:startupLink
         Write-Log "Startup shortcut change failed: $($_.Exception.Message)"
-        [void][Windows.MessageBox]::Show(
-            'Could not change the startup setting. Your organization may block this.',
-            'Desktop Clock')
+        [void](Show-AppDialog -Kind Warning -Title "Couldn't change the startup setting" `
+            -Message 'Your organisation may not allow apps to start at sign-in on this PC.')
     }
 }
 $startupMenu.IsCheckable = $true
@@ -3677,14 +4067,14 @@ $startMenuItem = New-MenuItem 'Show in Start menu' {
 $startMenuItem.IsCheckable = $true
 [void]$menu.Items.Add($startMenuItem)
 
-$updateMenu = New-MenuItem ('Update available' + $script:ch.Ellipsis) { Install-Update }
+$updateMenu = New-MenuItem ('Update available' + $script:ch.Ellipsis) { Install-Update -Manual }
 $updateMenu.FontWeight = 'SemiBold'
 $updateMenu.Visibility = 'Collapsed'
 [void]$menu.Items.Add($updateMenu)
 
 $updatesMenu = New-MenuItem 'Updates' $null
 [void]$updatesMenu.Items.Add((New-MenuItem 'Check for updates now' { Start-UpdateCheck -Manual }))
-$autoUpdateMenu = New-MenuItem 'Check automatically (daily)' {
+$autoUpdateMenu = New-MenuItem 'Update automatically (daily)' {
     $script:config.UpdateChecks = [bool]$autoUpdateMenu.IsChecked
     Save-Settings
 }
@@ -3709,7 +4099,7 @@ $contrastInfo.IsEnabled = $false
 $installInfo = New-MenuItem "Installed in: $($script:installFolder)" $null
 $installInfo.IsEnabled = $false
 [void]$diagnosticsMenu.Items.Add($installInfo)
-[void]$diagnosticsMenu.Items.Add((New-MenuItem ('Uninstall Desktop Clock' + $script:ch.Ellipsis) { Uninstall-Widget }))
+[void]$diagnosticsMenu.Items.Add((New-MenuItem ('Uninstall ' + $script:AppName + $script:ch.Ellipsis) { Uninstall-Widget }))
 [void]$diagnosticsMenu.Items.Add((New-MenuItem 'Open settings and log folder' {
     [void][IO.Directory]::CreateDirectory($script:settingsFolder)
     Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $script:settingsFolder + '"')
@@ -3724,6 +4114,10 @@ $creditMenu.IsEnabled = $false
 $menu.Add_Opened({
     $hideTimer.Stop()
     Set-ControlsVisible $true
+
+    # Close the menu when the user clicks anywhere outside it (see below).
+    $script:menuOpenedAt = Get-Date
+    $menuWatch.Start()
 
     $startupMenu.IsChecked = Test-Path $script:startupLink
     $startMenuItem.IsChecked = Test-Path $script:startMenuLink
@@ -3762,7 +4156,25 @@ $menu.Add_Opened({
 })
 
 $menu.Add_Closed({
+    $menuWatch.Stop()
     if (-not $ui.ControlHotspot.IsMouseOver) { $hideTimer.Start() }
+})
+
+# The widget never takes focus (so it stays on the desktop), which means
+# Windows does not close its menu on an outside click. While the menu is
+# open this checks the mouse a few times per second and closes it when a
+# button is pressed outside the menu and its submenus. Clicks within the
+# first quarter second are ignored (the click that opened the menu).
+$script:menuOpenedAt = [DateTime]::MinValue
+$menuWatch = New-Object Windows.Threading.DispatcherTimer
+$menuWatch.Interval = [TimeSpan]::FromMilliseconds(60)
+$menuWatch.Add_Tick({
+    if (-not $menu.IsOpen) { $menuWatch.Stop(); return }
+    if (((Get-Date) - $script:menuOpenedAt).TotalMilliseconds -lt 250) { return }
+    if ([DesktopClockNative]::PressedOutsideMenus($script:hwnd)) {
+        $menuWatch.Stop()
+        $menu.IsOpen = $false
+    }
 })
 
 function Open-SettingsMenu([switch]$AtMouse) {
@@ -3883,7 +4295,7 @@ $script:trayUpdateItem = $null
 try {
     [Windows.Forms.Application]::EnableVisualStyles()
     $trayMenu = New-Object Windows.Forms.ContextMenuStrip
-    $script:trayUpdateItem = New-TrayItem ('Update available' + $script:ch.Ellipsis) { Invoke-Later { Install-Update } }
+    $script:trayUpdateItem = New-TrayItem ('Update available' + $script:ch.Ellipsis) { Invoke-Later { Install-Update -Manual } }
     $script:trayUpdateItem.Visible = $false
     $script:trayUpdateItem.Font = New-Object Drawing.Font -ArgumentList $script:trayUpdateItem.Font, ([Drawing.FontStyle]::Bold)
     [void]$trayMenu.Items.Add($script:trayUpdateItem)
@@ -3896,7 +4308,7 @@ try {
 
     $script:tray = New-Object Windows.Forms.NotifyIcon
     $script:tray.Icon = New-TrayIcon
-    $script:tray.Text = 'Desktop Clock'
+    $script:tray.Text = $script:AppName
     $script:tray.ContextMenuStrip = $trayMenu
     $script:tray.Add_MouseClick({
         param($sender, $e)
@@ -4089,6 +4501,7 @@ $window.Add_ContentRendered({
     Save-Position
 
     Update-Shortcuts
+    Invoke-Later { Show-UpdatedNotice }
 
     $os = [Environment]::OSVersion.Version
     Write-Log ("Started. Windows {0}, PowerShell {1}, monitor {2}, auto contrast: {3}" -f
@@ -4235,9 +4648,9 @@ finally {
         # including this program copy, can be removed.
         try { Remove-Item -LiteralPath $script:settingsFolder -Recurse -Force -ErrorAction Stop }
         catch {
-            [void][Windows.MessageBox]::Show(
-                "Desktop Clock was closed, but this folder could not be fully deleted:`n" +
-                "$($script:settingsFolder)`n`n$($_.Exception.Message)", 'Desktop Clock')
+            [void](Show-AppDialog -Kind Warning -Title 'Uninstall not fully completed' `
+                -Message 'The widget was closed, but some of its files could not be removed.' `
+                -Note "$($script:settingsFolder)`n$($_.Exception.Message)")
         }
     }
 }
