@@ -3049,11 +3049,6 @@ $startupMenu = New-MenuItem 'Launch at Windows sign-in' {
     }
     catch {
         $startupMenu.IsChecked = Test-Path $script:startupLink
-    foreach ($entry in $showMenu.Items) { $entry.IsChecked = ($entry.Tag -eq $script:config.Show) }
-    $sizeMenu.IsEnabled = $script:config.Show -eq 'Both'
-    $secondsItem.IsChecked = [bool]$script:config.ShowSeconds
-    $clock24Item.IsChecked = [bool]$script:config.Use24h
-    $startMenuItem.IsChecked = Test-Path $script:startMenuLink
         Write-Log "Startup shortcut change failed: $($_.Exception.Message)"
         [void][Windows.MessageBox]::Show(
             'Could not change the startup setting. Your organization may block this.',
@@ -3126,6 +3121,11 @@ $menu.Add_Opened({
     Set-ControlsVisible $true
 
     $startupMenu.IsChecked = Test-Path $script:startupLink
+    $startMenuItem.IsChecked = Test-Path $script:startMenuLink
+    foreach ($entry in $showMenu.Items) { $entry.IsChecked = ($entry.Tag -eq $script:config.Show) }
+    $sizeMenu.IsEnabled = $script:config.Show -eq 'Both'
+    $secondsItem.IsChecked = [bool]$script:config.ShowSeconds
+    $clock24Item.IsChecked = [bool]$script:config.Use24h
 
     $onText = 'temporary fallback'
     if ([DesktopClockNative]::OnPreferred) { $onText = 'preferred' }
