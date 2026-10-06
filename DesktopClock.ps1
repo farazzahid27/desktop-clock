@@ -58,7 +58,7 @@ Add-Type -AssemblyName System.Windows.Forms
 # ---- Version and update source --------------------------------------------
 # Raise AppVersion before publishing a new GitHub release with a higher tag
 # (e.g. AppVersion 1.1.0 -> release tag v1.1.0).
-$script:AppVersion = [version]'1.1.0'
+$script:AppVersion = [version]'1.2.0'
 $script:UpdateRepo = 'farazzahid27/desktop-clock'
 
 # ------------------------------------------------------------
@@ -963,7 +963,8 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
         ShowInTaskbar="False"
         ShowActivated="False"
         WindowStartupLocation="Manual"
-        UseLayoutRounding="True">
+        UseLayoutRounding="True"
+        FontFamily="Segoe UI" FontWeight="Normal">
 
     <Window.Resources>
         <Style x:Key="IconButton" TargetType="Button">
@@ -1009,13 +1010,12 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                                 VerticalAlignment="Center"
                                 HorizontalAlignment="Left">
                         <!-- Header: "Monday, 05 Oct 2026 | Week 41" -->
-                        <TextBlock x:Name="DateText" FontFamily="Segoe UI"
-                                   FontSize="13" Opacity="0.72"
+                        <TextBlock x:Name="DateText"
+                                   FontSize="14" Opacity="0.72"
                                    TextTrimming="CharacterEllipsis"/>
                         <!-- Hours, minutes and seconds share one size and weight.
                              Tabular digits keep the width steady every second. -->
                         <TextBlock x:Name="TimeText" Text="00:00:00"
-                                   FontFamily="Segoe UI" FontWeight="Light"
                                    FontSize="54" Typography.NumeralAlignment="Tabular"
                                    Margin="-3,-3,0,-4"/>
                     </StackPanel>
@@ -1028,7 +1028,7 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
 
                         <!-- City, uppercase: "TAMPERE, FI" -->
                         <TextBlock x:Name="LocationText" Text="CHOOSE YOUR CITY"
-                                   FontFamily="Segoe UI" FontSize="11.5"
+                                   FontSize="14"
                                    Opacity="0.7"
                                    TextTrimming="CharacterEllipsis"/>
 
@@ -1044,43 +1044,55 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
-                            <TextBlock x:Name="TemperatureText" FontFamily="Segoe UI"
-                                       VerticalAlignment="Center"><Run x:Name="TempValue"
-                                       Text="--" FontSize="46" FontWeight="SemiBold"/><Run
-                                       x:Name="TempUnit" Text="" FontSize="20"
-                                       FontWeight="Light" BaselineAlignment="Top"/></TextBlock>
+                            <!-- Number (XL) with the unit (L) whose top lines up with
+                                 the top of the digits; the offset is computed at start. -->
+                            <StackPanel x:Name="TemperatureText" Orientation="Horizontal"
+                                        VerticalAlignment="Center">
+                                <TextBlock x:Name="TempValue" Text="--" FontSize="54"
+                                           Typography.NumeralAlignment="Tabular"/>
+                                <TextBlock x:Name="TempUnit" Text="" FontSize="20"
+                                           VerticalAlignment="Top" Margin="3,0,0,0"/>
+                            </StackPanel>
 
                             <Viewbox x:Name="WeatherArt" Grid.Column="1"
                                      Width="68" Height="58" Margin="12,0,-5,0"
                                      HorizontalAlignment="Center" Stretch="Uniform"/>
 
                             <TextBlock x:Name="FeelsText" Grid.Row="1"
-                                       FontFamily="Segoe UI" FontSize="13.5"
+                                       FontSize="14"
                                        Margin="1,0,0,0" VerticalAlignment="Top"/>
 
                             <TextBlock x:Name="ConditionText" Grid.Row="1" Grid.Column="1"
                                        Text="Weather not loaded"
-                                       FontFamily="Segoe UI" FontSize="13.5"
+                                       FontSize="14"
                                        TextAlignment="Center" TextWrapping="Wrap"
                                        MaxWidth="130" Margin="12,0,-5,0"
                                        HorizontalAlignment="Center" VerticalAlignment="Top"/>
                         </Grid>
 
-                        <!-- Footer: "Updated 1 minute ago" + refresh -->
-                        <Grid Margin="0,8,0,0" HorizontalAlignment="Left">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock x:Name="UpdatedText" FontFamily="Segoe UI"
-                                       FontSize="11" Opacity="0.58"
-                                       VerticalAlignment="Center"
-                                       TextTrimming="CharacterEllipsis"/>
-                            <Button x:Name="RefreshButton" Grid.Column="1" Tag="NoDrag"
-                                    Style="{StaticResource IconButton}"
-                                    Width="20" Height="20" FontSize="13"
-                                    Margin="3,0,0,0" Content="&#x21BB;"
-                                    ToolTip="Refresh weather now"/>
+                        <!-- Footer: "Updated 1 minute ago" + refresh. Hidden until the
+                             pointer is over this line, but always shown when the
+                             weather is stale, a refresh failed or no city is set.
+                             Its space is kept so the layout never jumps. -->
+                        <Grid x:Name="FooterRow" Margin="0,8,0,0" Background="#01000000"
+                              Opacity="0">
+                            <!-- Inner grid hugs the text so the button sits right
+                                 after it; long text trims with an ellipsis. -->
+                            <Grid HorizontalAlignment="Left">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="UpdatedText"
+                                           FontSize="12" Opacity="0.62"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"/>
+                                <Button x:Name="RefreshButton" Grid.Column="1" Tag="NoDrag"
+                                        Style="{StaticResource IconButton}"
+                                        Width="20" Height="20" FontSize="12"
+                                        Margin="3,0,0,0" Content="&#x21BB;"
+                                        ToolTip="Refresh weather now"/>
+                            </Grid>
                         </Grid>
                     </StackPanel>
                 </Grid>
@@ -1143,7 +1155,7 @@ $ui = @{}
 @(
     'Card','ContentGrid','ClockPanel','ClockStack','WeatherPanel','WeatherStack',
     'Divider','DateText','TimeText','LocationText','TemperatureText','FeelsText',
-    'TempValue','TempUnit',
+    'TempValue','TempUnit','FooterRow',
     'WeatherArt','ConditionText','UpdatedText','RefreshButton','ControlHotspot',
     'CornerButtons','SettingsButton','CloseButton','ResizeGrip','TemperatureRow'
 ) | ForEach-Object { $ui[$_] = $window.FindName($_) }
@@ -1210,6 +1222,11 @@ function Update-Metrics {
     }
     $ui.TimeText.Measure((New-Size $infinite $infinite))
     $timeWidth = [double]$ui.TimeText.DesiredSize.Width
+
+    # Type scale: XL = time and temperature number (same size), L = unit,
+    # M = all other text, S = the "Updated" line. One font, one weight.
+    $ui.TempValue.FontSize = $ui.TimeText.FontSize
+    Update-UnitAlignment
     $script:timeWidth = [Math]::Ceiling($timeWidth)
 
     $script:clockWidth = [Math]::Ceiling([Math]::Max($timeWidth, $script:dateWidth))
@@ -1220,18 +1237,54 @@ function Update-Metrics {
     $script:narrowMinWidth = 32.0 + $script:timeWidth
 }
 
+# Places the top of the degree-C unit level with the top of the digits. In WPF the
+# baseline sits FontFamily.Baseline * size below the top of a text line and
+# capitals reach CapsHeight * size above it, so the cap tops of two sizes
+# differ by (Baseline - CapsHeight) * (big - small).
+function Update-UnitAlignment {
+    try {
+        $typeface = New-Object Windows.Media.Typeface -ArgumentList $ui.TempValue.FontFamily,
+            $ui.TempValue.FontStyle, $ui.TempValue.FontWeight, $ui.TempValue.FontStretch
+        $gap = $typeface.FontFamily.Baseline - $typeface.CapsHeight
+        $offset = [Math]::Max(0.0, $gap * ($ui.TempValue.FontSize - $ui.TempUnit.FontSize))
+        $ui.TempUnit.Margin = New-Object Windows.Thickness -ArgumentList 3, $offset, 0, 0
+    }
+    catch {
+        Write-Log "Unit alignment fallback: $($_.Exception.Message)"
+    }
+}
+
+# Stacked layout: the icon takes the room left beside the temperature, so a
+# short reading ("16") gets a big icon and a long one ("-12") a smaller one,
+# keeping a small, even gap. The icon's right edge stays under the seconds.
+function Update-ArtSize {
+    $infinite = [double]::PositiveInfinity
+    $ui.TemperatureText.Measure((New-Size $infinite $infinite))
+    $temperature = [double]$ui.TemperatureText.DesiredSize.Width
+    $available = $script:timeWidth - $temperature - 12 + 5
+    $size = [Math]::Max(72.0, [Math]::Min(112.0, [Math]::Floor($available)))
+    $height = [Math]::Round($size * 0.86)
+    if ($ui.WeatherArt.Width -ne $size) {
+        $ui.WeatherArt.Width = $size
+        $ui.WeatherArt.Height = $height
+    }
+}
+
 # Weather sizing per layout. Wide stays as it is; stacked gets a larger icon
 # and the temperature column is indented slightly from the left edge.
 function Set-WeatherSizing([string]$mode) {
-    if ($mode -eq 'Narrow') { $art = 86; $artHeight = 74; $indent = 10 }
-    else { $art = 68; $artHeight = 58; $indent = 0 }
-
-    if ($ui.WeatherArt.Width -ne $art) {
-        $ui.WeatherArt.Width = $art
-        $ui.WeatherArt.Height = $artHeight
+    if ($mode -eq 'Narrow') {
+        $indent = 10
+        Update-ArtSize
     }
+    else {
+        $indent = 0
+        if ($ui.WeatherArt.Width -ne 68) { $ui.WeatherArt.Width = 68; $ui.WeatherArt.Height = 58 }
+    }
+
+    # Temperature may be indented; "Feels like" always lines up with the city.
     $tempMargin = New-Object Windows.Thickness -ArgumentList $indent, 0, 0, 0
-    $feelsMargin = New-Object Windows.Thickness -ArgumentList ($indent + 1), 0, 0, 0
+    $feelsMargin = New-Object Windows.Thickness -ArgumentList 0
     if ($ui.TemperatureText.Margin -ne $tempMargin) { $ui.TemperatureText.Margin = $tempMargin }
     if ($ui.FeelsText.Margin -ne $feelsMargin) { $ui.FeelsText.Margin = $feelsMargin }
 }
@@ -1407,6 +1460,7 @@ function Set-WidgetSize {
 
     Update-Layout $mode
     Update-ControlReserve $mode
+    if ($mode -eq 'Narrow') { Update-ArtSize }
 
     # Stacked: lock the content to the width of the time, so the weather icon
     # ends exactly under the last digit of the seconds. If the square card is
@@ -1694,7 +1748,7 @@ function Set-Appearance([switch]$Force) {
     $script:mutedBrush = Get-Brush $muted
 
     foreach ($name in @(
-        'DateText','TimeText','LocationText','TemperatureText','FeelsText',
+        'DateText','TimeText','LocationText','TempValue','FeelsText',
         'ConditionText','UpdatedText','RefreshButton','SettingsButton',
         'CloseButton','ResizeGrip'
     )) {
@@ -1887,6 +1941,20 @@ function Set-FeelsDisplay([string]$text) {
     $ui.FeelsText.Text = $text
 }
 
+$script:footerHover = $false
+$script:footerForced = $true
+$script:footerVisible = $false
+
+function Update-FooterVisibility {
+    $visible = $script:footerHover -or $script:footerForced
+    if ($visible -eq $script:footerVisible) { return }
+    $script:footerVisible = $visible
+    $target = 0.0
+    if ($visible) { $target = 1.0 }
+    $animation = New-Object Windows.Media.Animation.DoubleAnimation -ArgumentList $target, $script:fadeDuration
+    $ui.FooterRow.BeginAnimation([Windows.UIElement]::OpacityProperty, $animation)
+}
+
 function Update-WeatherStatus {
     $now = Get-Date
     $busy = $null -ne $script:weatherTask
@@ -1927,6 +1995,12 @@ function Update-WeatherStatus {
     }
 
     if ($ui.UpdatedText.Text -ne $text) { $ui.UpdatedText.Text = $text }
+
+    # Shown on hover only, except when the user must know: stale data, a
+    # failed refresh, no city yet, or nothing loaded.
+    $script:footerForced = $stale -or $script:updateFailed -or -not $hasCity -or
+        $null -eq $script:lastUpdated
+    Update-FooterVisibility
 
     $tempOpacity = 1.0
     $artOpacity = 1.0
@@ -2914,6 +2988,15 @@ $ui.ControlHotspot.Add_MouseLeave({
 $ui.ControlHotspot.Add_MouseLeftButtonDown({
     param($sender, $e)
     $e.Handled = $true   # empty part of the control area never starts a drag
+})
+
+$ui.FooterRow.Add_MouseEnter({
+    $script:footerHover = $true
+    Update-FooterVisibility
+})
+$ui.FooterRow.Add_MouseLeave({
+    $script:footerHover = $false
+    Update-FooterVisibility
 })
 
 $ui.SettingsButton.Add_Click({ Open-SettingsMenu })
