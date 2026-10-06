@@ -1001,9 +1001,9 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
         </Style>
     </Window.Resources>
 
-    <Border x:Name="Card" CornerRadius="12">
+    <Border x:Name="Card" CornerRadius="10">
         <Grid>
-            <Grid x:Name="ContentGrid" Background="#01000000" Margin="16,14,16,14">
+            <Grid x:Name="ContentGrid" Background="#01000000" Margin="10,8,10,8">
 
                 <Grid x:Name="ClockPanel" Background="#01000000">
                     <StackPanel x:Name="ClockStack"
@@ -1103,7 +1103,7 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                  the pointer is inside it. Text underneath reserves room for it. -->
             <Border x:Name="ControlHotspot" Tag="NoDrag" Background="#01000000"
                     HorizontalAlignment="Right" VerticalAlignment="Top"
-                    CornerRadius="6" Padding="3" Margin="0,6,6,0">
+                    CornerRadius="6" Padding="2" Margin="0,4,4,0">
                 <StackPanel x:Name="CornerButtons" Orientation="Horizontal" Opacity="0">
                     <Button x:Name="SettingsButton"
                             Style="{StaticResource IconButton}"
@@ -1118,7 +1118,7 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
             </Border>
 
             <Thumb x:Name="ResizeGrip" Tag="NoDrag"
-                   Width="18" Height="18" Margin="0,0,3,3"
+                   Width="18" Height="18" Margin="0,0,1,1"
                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
                    Cursor="SizeNWSE" ToolTip="Drag to resize">
                 <Thumb.Template>
@@ -1178,6 +1178,10 @@ $script:weatherMinWidth = 160.0
 $script:controlReserve = 46.0
 $script:dateWidth = 130.0
 $script:timeWidth = 180.0
+
+# Card padding around the content (must match ContentGrid's Margin).
+$script:padX = 10.0   # left and right
+$script:padY = 8.0    # top and bottom
 $script:stackedWidth = 226.0
 
 function New-Size([double]$width, [double]$height) {
@@ -1196,7 +1200,7 @@ function Update-Metrics {
     # 16 px side margin), plus a small gap.
     $ui.ControlHotspot.Measure((New-Size $infinite $infinite))
     $script:controlReserve = [Math]::Max(0.0,
-        [double][Math]::Ceiling($ui.ControlHotspot.DesiredSize.Width) - 16 + 4)
+        [double][Math]::Ceiling($ui.ControlHotspot.DesiredSize.Width) - $script:padX + 4)
 
     # Widest header this week (day names differ in length), measured with
     # the real font. Week 52 stands in for any two-digit week number.
@@ -1232,7 +1236,7 @@ function Update-Metrics {
     $script:timeWidth = [Math]::Ceiling($timeWidth)
 
     $script:clockWidth = [Math]::Ceiling([Math]::Max($timeWidth, $script:dateWidth))
-    $script:wideMinWidth = 32.0 + $script:clockWidth + 29.0 + $script:weatherMinWidth
+    $script:wideMinWidth = 2 * $script:padX + $script:clockWidth + 29.0 + $script:weatherMinWidth
     # Stacked layout is exactly as wide as the clock block: the end of the
     # time is the right edge of the whole widget.
     # (Widened only if today's date plus the corner controls would not fit.)
@@ -1241,7 +1245,7 @@ function Update-Metrics {
     # week number are never cut off.
     $script:stackedWidth = [Math]::Ceiling([Math]::Max($script:timeWidth,
         $script:dateWidth + $script:controlReserve))
-    $script:narrowMinWidth = 32.0 + $script:stackedWidth
+    $script:narrowMinWidth = 2 * $script:padX + $script:stackedWidth
 }
 
 # Places the top of the degree-C unit level with the top of the digits. In WPF the
@@ -1362,7 +1366,7 @@ function Get-WideWidth {
     if ($script:layoutMode -ne 'Wide') { Set-WeatherSizing $script:layoutMode }
 
     # +1 guards against layout rounding wrapping the condition line.
-    return 32.0 + $script:clockWidth + 29.0 + $widest + 1.0
+    return 2 * $script:padX + $script:clockWidth + 29.0 + $widest + 1.0
 }
 
 # The top line of each layout keeps clear of the corner controls:
@@ -1381,19 +1385,19 @@ function Update-ControlReserve([string]$mode) {
 }
 
 function Get-MinimumHeight([string]$mode, [double]$width) {
-    $inner = $width - 32
+    $inner = $width - 2 * $script:padX
 
     if ($mode -eq 'Wide') {
         $weatherWidth = [Math]::Max(120.0, [double]($inner - $script:clockWidth - 29))
         $clock = Measure-Height $ui.ClockStack $script:clockWidth
         $weather = Measure-Height $ui.WeatherStack $weatherWidth
-        return 28.0 + [Math]::Max([double]$clock, [double]$weather) + 2.0
+        return 2 * $script:padY + [Math]::Max([double]$clock, [double]$weather) + 2.0
     }
 
     $inner = $script:stackedWidth   # stacked content width (normally the time's width)
     $clock = Measure-Height $ui.ClockStack $inner
     $weather = Measure-Height $ui.WeatherStack $inner
-    return 28.0 + $clock + 8 + 1 + 8 + $weather + 2
+    return 2 * $script:padY + $clock + 8 + 1 + 8 + $weather + 2
 }
 
 function Get-Scale {
@@ -1484,11 +1488,8 @@ function Set-WidgetSize {
     $minHeight = Get-MinimumHeight $mode $w
 
     if ($mode -eq 'Narrow') {
-        # Stacked layout is a 1:1 square at its natural size.
-        $side = [Math]::Max($w, [double]$minHeight)
-        $side = [Math]::Min($side, [Math]::Max([double]$minHeight, [double]$maxWidth))
-        $w = $side
-        $Height = $side
+        # Stacked layout fits its content exactly: no extra space around it.
+        $Height = 0
     }
     $h = $Height
     if ($h -le 0) { $h = $minHeight }
