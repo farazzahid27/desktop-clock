@@ -10,8 +10,10 @@ There is nothing to install system-wide and no administrator rights are needed.
 
 - **Clock:** time with or without seconds, 24- or 12-hour format, date and week
   number.
-- **Current weather:** temperature, "feels like" temperature and conditions
-  for the city you choose, refreshed every 15 minutes.
+- **Current weather:** temperature (°C or °F), "feels like" temperature and
+  conditions for the city you choose, refreshed every 15 minutes. Cities in Finland use
+  data from the Finnish Meteorological Institute (FMI); all other cities use
+  Open-Meteo.
 - **Wind and humidity:** current wind speed (m/s) and relative humidity.
 - **Animated weather icons:** sun, moon, clouds, rain, snow, thunderstorms and
   fog move gently. Rain and snow follow the real precipitation amount, and the
@@ -62,6 +64,7 @@ top-right corner:
 | Show | Clock and weather, clock only, or weather only |
 | Layout | Wide or stacked |
 | Time | Show seconds, 24-hour clock |
+| Temperature unit | Celsius (°C, the default) or Fahrenheit (°F) |
 | Animate weather icons | Turn icon animations on or off |
 | Keep on monitor | Choose which monitor the widget stays on |
 | Launch at Windows sign-in | Start the widget automatically |
@@ -91,9 +94,12 @@ information, and it contains no tracking or analytics.
 
 It connects to the internet only for:
 
-- **Weather:** the coordinates of the city you choose are sent to
-  [Open-Meteo](https://open-meteo.com) every 15 minutes to get the current
-  weather. City searches are also sent to Open-Meteo.
+- **Weather:** the coordinates of the city you choose are sent every
+  15 minutes to get the current weather: to the
+  [Finnish Meteorological Institute (FMI)](https://en.ilmatieteenlaitos.fi/open-data)
+  for cities in Finland, and to [Open-Meteo](https://open-meteo.com) for all
+  other cities (and for Finnish cities if FMI cannot be reached). City
+  searches are sent to Open-Meteo.
 - **Updates:** once a day it checks this GitHub repository for a new version
   and, if there is one, downloads it from GitHub.
 
@@ -120,9 +126,10 @@ available to the owner.
 - If your organisation enforces signed scripts or restricts PowerShell
   (for example Constrained Language Mode), the widget does not try to work
   around it. It stops or skips updates and tells the user instead.
-- Network access: `api.open-meteo.com` and `geocoding-api.open-meteo.com`
-  (weather and city search), `github.com` and `raw.githubusercontent.com`
-  (update check and download). The system proxy is used.
+- Network access: `opendata.fmi.fi` (weather for cities in Finland),
+  `api.open-meteo.com` and `geocoding-api.open-meteo.com` (weather elsewhere
+  and city search), `github.com` and `raw.githubusercontent.com` (update
+  check and download). The system proxy is used.
 
 ## Uninstall
 
@@ -142,7 +149,8 @@ If it still does not run, your organisation may restrict PowerShell scripts.
 Please ask your IT team rather than trying to work around it.
 
 **The weather does not load.** Check that a city is chosen and that your
-network allows access to `open-meteo.com`. The line under the weather shows
+network allows access to `open-meteo.com` (and `opendata.fmi.fi` for cities
+in Finland). The line under the weather shows
 when the last update succeeded; hover over it for details.
 
 **Something else.** Right-click the widget, choose
@@ -151,8 +159,12 @@ you report the problem in this repository's Issues.
 
 ## Credits
 
-Weather data by [Open-Meteo.com](https://open-meteo.com), licensed under
+Weather data for cities in Finland: Finnish Meteorological Institute (FMI)
+[open data](https://en.ilmatieteenlaitos.fi/open-data), licensed under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+Weather data for other cities and city search: [Open-Meteo.com](https://open-meteo.com),
+licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 ## License
 

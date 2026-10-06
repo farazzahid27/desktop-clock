@@ -8,7 +8,8 @@
 #   Startup folder shortcut                     only if you enable it
 #
 # Network: Open-Meteo forecast (every 15 min, back-off on failure) and
-#          Open-Meteo geocoding (only while searching for a city).
+#          Open-Meteo geocoding (only while searching for a city). For
+#          cities in Finland the weather comes from FMI open data instead.
 #
 # Main changes from version 1
 #   - No reparenting into Explorer. The widget is a normal top-level window
@@ -1086,6 +1087,7 @@ $script:config = @{
     BothLayout      = 'Wide'    # last layout used when both are shown
     ShowSeconds     = $true
     Use24h          = $true
+    TempUnit        = 'C'       # C (Celsius, default) or F (Fahrenheit)
     StartMenu       = $true
     LastUpdateCheck = $null
     UpdatedFrom     = $null    # set just before an automatic update restarts the widget
@@ -1127,6 +1129,7 @@ if ($script:config.Show -notin @('Both','Clock','Weather')) { $script:config.Sho
 if ($script:config.BothLayout -notin @('Wide','Narrow')) { $script:config.BothLayout = 'Wide' }
 try { $script:config.ShowSeconds = [bool]$script:config.ShowSeconds } catch { $script:config.ShowSeconds = $true }
 try { $script:config.Use24h = [bool]$script:config.Use24h } catch { $script:config.Use24h = $true }
+if ($script:config.TempUnit -notin @('C','F')) { $script:config.TempUnit = 'C' }
 
 try { $script:config.StartMenu = [bool]$script:config.StartMenu }
 catch { $script:config.StartMenu = $true }
@@ -2124,6 +2127,7 @@ function Get-MoonXaml([double]$cx, [double]$cy, [double]$r) {
     $or = $r * 0.84
 
 @"
+<Canvas Tag="Sun">
 <Path Tag="Rock" Stroke="#9C8FE0" StrokeThickness="0.6">
   <Path.RenderTransform><RotateTransform CenterX="$(Fmt $cx)" CenterY="$(Fmt $cy)"/></Path.RenderTransform>
   <Path.Fill>
@@ -2147,6 +2151,7 @@ function Get-MoonXaml([double]$cx, [double]$cy, [double]$r) {
          Width="2.6" Height="2.6" Fill="#E8E2FF"/>
 <Ellipse Tag="Twinkle" Canvas.Left="$(Fmt ($cx + $r * 1.3))" Canvas.Top="$(Fmt ($cy - $r * 0.3))"
          Width="1.8" Height="1.8" Fill="#E8E2FF"/>
+</Canvas>
 "@
 }
 
@@ -2158,6 +2163,8 @@ function Get-SkyXaml([bool]$day, [double]$cx, [double]$cy, [double]$r) {
 function Get-CloudXaml([double]$left, [double]$top, [double]$scale, [string]$tone) {
     switch ($tone) {
         'grey' { $upper = '#EEF2F6'; $lower = '#AAB6C4'; $edge = '#91A0B1' }
+        'pale' { $upper = '#F4F7FA'; $lower = '#BCC7D3'; $edge = '#97A6B7' }   # light rain, snow
+        'mid'  { $upper = '#DDE3EA'; $lower = '#98A6B6'; $edge = '#7F8EA0' }   # normal rain
         'dark' { $upper = '#B2BCC8'; $lower = '#6C7887'; $edge = '#5C6877' }
         default { $upper = '#FFFFFF'; $lower = '#D4E0EE'; $edge = '#A6B8CC' }
     }
@@ -2182,22 +2189,33 @@ function Get-CloudXaml([double]$left, [double]$top, [double]$scale, [string]$ton
 }
 
 # One path per drop, so drops can fall one after another. $seconds is the
-# fall time, stored in the Tag for the animation.
-function Get-RainXaml([double]$x0, [double]$y0, [int]$count, [double]$gap,
-                      [double]$length, [double]$thick, [string]$color, [double]$seconds) {
+# fall time; $burst makes them fall in short bursts with pauses (showers).
+function Get-DropsXaml([double[]]$xs, [double]$y0, [double]$length, [double]$thick,
+                       [string]$color, [double]$seconds, [bool]$burst = $false) {
+    $tag = "Rain:$(Fmt $seconds)"
+    if ($burst) { $tag += ':B' }
     $out = New-Object Text.StringBuilder
-    for ($i = 0; $i -lt $count; $i++) {
-        $x = $x0 + $i * $gap
+    for ($i = 0; $i -lt $xs.Count; $i++) {
+        $x = $xs[$i]
         $y = $y0 + ($i % 2) * 3
         $data = "M $(Fmt $x),$(Fmt $y) L $(Fmt ($x - $length * 0.35)),$(Fmt ($y + $length))"
-        [void]$out.Append("<Path Tag=`"Rain:$(Fmt $seconds)`" Data=`"$data`" Stroke=`"$color`" StrokeThickness=`"$(Fmt $thick)`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>")
+        [void]$out.Append("<Path Tag=`"$tag`" Data=`"$data`" Stroke=`"$color`" StrokeThickness=`"$(Fmt $thick)`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>")
     }
     $out.ToString()
 }
 
+function Get-RainXaml([double]$x0, [double]$y0, [int]$count, [double]$gap,
+                      [double]$length, [double]$thick, [string]$color, [double]$seconds,
+                      [bool]$burst = $false) {
+    $xs = @(for ($i = 0; $i -lt $count; $i++) { $x0 + $i * $gap })
+    Get-DropsXaml $xs $y0 $length $thick $color $seconds $burst
+}
+
 # $points: flat list x1,y1,x2,y2,...
 # Flurries: small, simple three-line flakes that sway as they drift down.
-function Get-FlurryXaml([double[]]$points, [double]$seconds) {
+function Get-FlurryXaml([double[]]$points, [double]$seconds, [bool]$burst = $false) {
+    $tag = "Flurry:$(Fmt $seconds)"
+    if ($burst) { $tag += ':B' }
     $out = New-Object Text.StringBuilder
     for ($i = 0; $i + 1 -lt $points.Count; $i += 2) {
         $x = $points[$i]; $y = $points[$i + 1]
@@ -2207,14 +2225,15 @@ function Get-FlurryXaml([double[]]$points, [double]$seconds) {
             $c = [Math]::Cos($a) * 2.6; $s = [Math]::Sin($a) * 2.6
             [void]$data.Append("M $(Fmt ($x - $c)),$(Fmt ($y - $s)) L $(Fmt ($x + $c)),$(Fmt ($y + $s)) ")
         }
-        [void]$out.Append("<Path Tag=`"Flurry:$(Fmt $seconds)`" Data=`"$($data.ToString().Trim())`" Stroke=`"#5FBDEF`" StrokeThickness=`"1.3`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>")
+        [void]$out.Append("<Path Tag=`"$tag`" Data=`"$($data.ToString().Trim())`" Stroke=`"#5FBDEF`" StrokeThickness=`"1.3`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>")
     }
     $out.ToString()
 }
 
 # Snowflakes: six arms with a small branch on each, turning slowly as they
 # fall. Tag holds fall time, turn time and fall distance.
-function Get-FlakeXaml([double[]]$points, [double]$size, [double]$fall, [double]$spin, [double]$dy) {
+function Get-FlakeXaml([double[]]$points, [double]$size, [double]$fall, [double]$spin, [double]$dy,
+                       [bool]$burst = $false) {
     $out = New-Object Text.StringBuilder
     for ($i = 0; $i + 1 -lt $points.Count; $i += 2) {
         $x = $points[$i]; $y = $points[$i + 1]
@@ -2231,6 +2250,7 @@ function Get-FlakeXaml([double[]]$points, [double]$size, [double]$fall, [double]
             }
         }
         $tag = "Flake:$(Fmt $fall):$(Fmt $spin):$(Fmt $dy)"
+        if ($burst) { $tag += ':B' }
         [void]$out.Append("<Path Tag=`"$tag`" Data=`"$($data.ToString().Trim())`" Stroke=`"#5FBDEF`" StrokeThickness=`"1.2`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>")
     }
     $out.ToString()
@@ -2255,15 +2275,15 @@ function Get-PelletXaml([double[]]$points) {
 }
 
 # Snow by intensity: 1 flurries, 2 snow, 3 heavy snow (larger, more, faster).
-function Get-SnowArt([int]$level, [double]$shift) {
+function Get-SnowArt([int]$level, [double]$shift, [bool]$burst = $false) {
     if ($level -le 1) {
-        return Get-FlurryXaml @(24, (52 + $shift), 42, (56 + $shift)) 4.2
+        return Get-FlurryXaml @(24, (52 + $shift), 42, (56 + $shift)) 4.2 $burst
     }
     if ($level -eq 2) {
-        return Get-FlakeXaml @(18, (51 + $shift), 32, (55 + $shift), 46, (51 + $shift)) 3.8 2.8 7 6
+        return Get-FlakeXaml @(18, (51 + $shift), 32, (55 + $shift), 46, (51 + $shift)) 3.8 2.8 7 6 $burst
     }
     return Get-FlakeXaml @(14, (50 + $shift), 24, (54 + $shift), 34, (50 + $shift),
-        44, (54 + $shift), 54, (50 + $shift)) 4.6 1.9 5 6
+        44, (54 + $shift), 54, (50 + $shift)) 4.6 1.9 5 6 $burst
 }
 
 function Get-HailXaml([double[]]$points) {
@@ -2274,9 +2294,12 @@ function Get-HailXaml([double[]]$points) {
     $out.ToString()
 }
 
-function Get-BoltXaml([double]$x, [double]$y) {
+# $strong: a quicker, brighter double flicker; $delay: start later (two bolts).
+function Get-BoltXaml([double]$x, [double]$y, [bool]$strong = $false, [double]$delay = 0) {
+    $tag = 'Flash'
+    if ($strong) { $tag = "Flash:S:$(Fmt $delay)" }
 @"
-<Path Tag="Flash" Data="M 6,0 L -4,15 L 3,15 L -1,28 L 12,10 L 5,10 L 10,0 Z" Stroke="#D98300" StrokeThickness="0.6">
+<Path Tag="$tag" Data="M 6,0 L -4,15 L 3,15 L -1,28 L 12,10 L 5,10 L 10,0 Z" Stroke="#D98300" StrokeThickness="0.6">
   <Path.Fill>
     <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
       <GradientStop Color="#FFE77E" Offset="0"/>
@@ -2288,11 +2311,15 @@ function Get-BoltXaml([double]$x, [double]$y) {
 "@
 }
 
-function Get-FogXaml([double]$y) {
+# Fog and mist lines at the given heights; thin and faint for mist, thick
+# and dense for fog.
+function Get-FogXaml([double[]]$ys, [double]$width, [double]$opacity) {
     $out = New-Object Text.StringBuilder
-    foreach ($line in @(@(12, $y, 58), @(18, ($y + 6), 64), @(10, ($y + 12), 48))) {
-        $data = "M $(Fmt $line[0]),$(Fmt $line[1]) L $(Fmt $line[2]),$(Fmt $line[1])"
-        [void]$out.Append("<Path Tag=`"Fog`" Data=`"$data`" Stroke=`"#A1B0C2`" StrokeThickness=`"2.8`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>")
+    for ($i = 0; $i -lt $ys.Count; $i++) {
+        $x1 = 10 + ($i % 2) * 6
+        $x2 = 54 + ($i % 3) * 4
+        $data = "M $(Fmt $x1),$(Fmt $ys[$i]) L $(Fmt $x2),$(Fmt $ys[$i])"
+        [void]$out.Append("<Path Tag=`"Fog`" Data=`"$data`" Opacity=`"$(Fmt $opacity)`" Stroke=`"#A1B0C2`" StrokeThickness=`"$(Fmt $width)`" StrokeStartLineCap=`"Round`" StrokeEndLineCap=`"Round`"/>")
     }
     $out.ToString()
 }
@@ -2310,6 +2337,7 @@ function Get-Intensity([int]$code) {
             if ($snow -lt 4) { return 2 }
             return 3
         }
+        if ($null -ne $script:levelHint) { return $script:levelHint }
         if ($code -in @(71,85)) { return 1 }
         if ($code -eq 73) { return 2 }
         return 3
@@ -2320,16 +2348,18 @@ function Get-Intensity([int]$code) {
             if ($rain -lt 1) { return 2 }
             return 3
         }
+        if ($null -ne $script:levelHint) { return $script:levelHint }
         if ($code -in @(51,56)) { return 1 }
         if ($code -eq 53) { return 2 }
         return 3
     }
-    if ($code -in @(61,63,65,66,67,80,81,82)) {
+    if ($code -in @(61,63,65,66,67,68,69,80,81,82)) {
         if ($null -ne $rain -and $rain -gt 0) {
             if ($rain -lt 2.5) { return 1 }
             if ($rain -lt 7.6) { return 2 }
             return 3
         }
+        if ($null -ne $script:levelHint) { return $script:levelHint }
         if ($code -in @(61,66,80)) { return 1 }
         if ($code -in @(63,81)) { return 2 }
         return 3
@@ -2381,8 +2411,9 @@ function New-ArtKeyFrames([double[]]$points, [double]$seconds, [double]$delay) {
 # bottom, so the jump back to the start is never visible. Each shape stays
 # hidden until its own first fall starts (they are spread over the loop).
 # $spin > 0 also turns the shape about its centre (60 degrees per turn).
+# $burst: fall in the first part of the loop, then pause (showers).
 function Start-ArtFall($element, [double]$dx, [double]$dy, [double]$seconds,
-                       [double]$delay, [double]$spin) {
+                       [double]$delay, [double]$spin, [bool]$burst = $false) {
     $move = New-Object Windows.Media.TranslateTransform
     if ($spin -gt 0) {
         $box = $element.Data.Bounds
@@ -2399,6 +2430,15 @@ function Start-ArtFall($element, [double]$dx, [double]$dy, [double]$seconds,
         $element.RenderTransform = $move
     }
     $element.Opacity = 0
+    if ($burst) {
+        $move.BeginAnimation([Windows.Media.TranslateTransform]::XProperty,
+            (New-ArtKeyFrames @(0.0, 0.0, 0.46, $dx, 1.0, $dx) $seconds $delay))
+        $move.BeginAnimation([Windows.Media.TranslateTransform]::YProperty,
+            (New-ArtKeyFrames @(0.0, 0.0, 0.46, $dy, 1.0, $dy) $seconds $delay))
+        $element.BeginAnimation([Windows.UIElement]::OpacityProperty,
+            (New-ArtKeyFrames @(0.0, 0.0, 0.08, 1.0, 0.36, 1.0, 0.46, 0.0, 1.0, 0.0) $seconds $delay))
+        return
+    }
     $move.BeginAnimation([Windows.Media.TranslateTransform]::XProperty,
         (New-ArtAnimation 0 $dx $seconds $false $delay))
     $move.BeginAnimation([Windows.Media.TranslateTransform]::YProperty,
@@ -2495,16 +2535,27 @@ function Start-ArtAnimations($canvas) {
                     (New-ArtAnimation $move.X ($move.X + $amount) (3.5 + 1.1 * $i) $true 0))
             }
             elseif ($kind -eq 'Rain') {
+                # Showers (":B") fall in bursts over a loop twice as long.
                 $seconds = Get-TagNumber $parts 1 1.0
-                Start-ArtFall $item -2 6 $seconds ($i * $seconds / $total) 0
+                $burst = $parts -contains 'B'
+                if ($burst) { $seconds *= 2.2 }
+                Start-ArtFall $item -2 6 $seconds ($i * $seconds / $total) 0 $burst
             }
             elseif ($kind -eq 'Flurry') {
                 $seconds = Get-TagNumber $parts 1 4.2
-                Start-ArtSway $item $seconds ($i * $seconds / $total)
+                if ($parts -contains 'B') {
+                    $seconds *= 1.8
+                    Start-ArtFall $item 1 6 $seconds ($i * $seconds / $total) 0 $true
+                }
+                else {
+                    Start-ArtSway $item $seconds ($i * $seconds / $total)
+                }
             }
             elseif ($kind -eq 'Flake') {
                 $seconds = Get-TagNumber $parts 1 2.8
-                Start-ArtFall $item 1 (Get-TagNumber $parts 3 6) $seconds ($i * $seconds / $total) (Get-TagNumber $parts 2 7)
+                $burst = $parts -contains 'B'
+                if ($burst) { $seconds *= 2 }
+                Start-ArtFall $item 1 (Get-TagNumber $parts 3 6) $seconds ($i * $seconds / $total) (Get-TagNumber $parts 2 7) $burst
             }
             elseif ($kind -eq 'Grain') {
                 $seconds = Get-TagNumber $parts 1 1.2
@@ -2517,10 +2568,18 @@ function Start-ArtAnimations($canvas) {
                 Start-ArtFall $item 0 5 1.0 ($i * 1.0 / $total) 0
             }
             elseif ($kind -eq 'Flash') {
-                # A bright double flicker every 3 seconds.
-                $item.BeginAnimation([Windows.UIElement]::OpacityProperty,
-                    (New-ArtKeyFrames @(0.0, 1.0, 0.55, 1.0, 0.58, 0.1, 0.62, 1.0,
-                        0.66, 0.2, 0.70, 1.0, 1.0, 1.0) 3.0 0))
+                if ($parts -contains 'S') {
+                    # Strong: two double flickers every 2.4 seconds.
+                    $item.BeginAnimation([Windows.UIElement]::OpacityProperty,
+                        (New-ArtKeyFrames @(0.0, 1.0, 0.20, 1.0, 0.23, 0.1, 0.27, 1.0, 0.55, 1.0,
+                            0.58, 0.1, 0.61, 1.0, 0.64, 0.2, 0.68, 1.0, 1.0, 1.0) 2.4 (Get-TagNumber $parts 2 0)))
+                }
+                else {
+                    # A bright double flicker every 3 seconds.
+                    $item.BeginAnimation([Windows.UIElement]::OpacityProperty,
+                        (New-ArtKeyFrames @(0.0, 1.0, 0.55, 1.0, 0.58, 0.1, 0.62, 1.0,
+                            0.66, 0.2, 0.70, 1.0, 1.0, 1.0) 3.0 0))
+                }
             }
             elseif ($kind -eq 'Fog') {
                 $amount = 5.0
@@ -2528,7 +2587,7 @@ function Start-ArtAnimations($canvas) {
                 $move = New-Object Windows.Media.TranslateTransform
                 $item.RenderTransform = $move
                 $move.BeginAnimation([Windows.Media.TranslateTransform]::XProperty,
-                    (New-ArtAnimation 0 $amount (3.5 + 0.8 * $i) $true 0))
+                    (New-ArtAnimation 0 $amount (3.5 + 0.7 * $i) $true 0))
             }
         }
         catch {
@@ -2543,7 +2602,8 @@ function Set-WeatherArt {
     $rainBlue = '#3AA2EE'
     $drizzleBlue = '#6CC4F4'
 
-    # Intensity sets how many drops fall, where, and how fast.
+    # Intensity (1 light, 2 normal, 3 heavy) sets how many drops or flakes
+    # fall, how fast, and how dark the cloud is.
     $level = Get-Intensity $code
     $x0 = @(24, 18, 14)[$level - 1]
     $count = @(2, 3, 5)[$level - 1]
@@ -2552,9 +2612,15 @@ function Set-WeatherArt {
     $drizzleSeconds = @(1.9, 1.4, 1.0)[$level - 1]
     $rainThick = 2.8
     if ($level -eq 3) { $rainThick = 2.4 }
+    $rainTone = @('pale', 'mid', 'dark')[$level - 1]
+    $snowTone = @('light', 'pale', 'mid')[$level - 1]
     $pellets = @(50, 56)
     if ($level -eq 3) { $pellets = @(46, 55, 56, 59) }
+    $sleetDrops = @(16, 38)
+    if ($level -eq 3) { $sleetDrops = @(16, 38, 60) }
 
+    # Showers (sun or moon, bursts of rain/snow) versus steady (full cloud,
+    # continuous fall): codes 80-82, 85-86, 69, 961, 962 are showers.
     if ($code -eq 0) {
         $art = Get-SkyXaml $day 36 35 16
     }
@@ -2562,13 +2628,20 @@ function Set-WeatherArt {
         $art = (Get-SkyXaml $day 33 30 15) + (Get-CloudXaml 30 40 0.62 'light')
     }
     elseif ($code -eq 2) {
-        $art = (Get-SkyXaml $day 48 22 12) + (Get-CloudXaml 4 27 1.0 'light')
+        # Partly cloudy: mostly sun, a small cloud.
+        $art = (Get-SkyXaml $day 40 25 15) + (Get-CloudXaml 2 34 0.62 'light')
     }
     elseif ($code -eq 3) {
-        $art = (Get-CloudXaml 20 12 0.8 'grey') + (Get-CloudXaml 4 26 1.0 'light')
+        # Cloudy: two grey clouds, no sun.
+        $art = (Get-CloudXaml 22 8 0.78 'mid') + (Get-CloudXaml 4 26 1.0 'pale')
+    }
+    elseif ($code -eq 10) {
+        # Mist: a light cloud and two faint, thin lines.
+        $art = (Get-CloudXaml 6 6 1.0 'light') + (Get-FogXaml @(50, 58) 1.6 0.55)
     }
     elseif ($code -in @(45,48)) {
-        $art = (Get-CloudXaml 6 6 1.0 'grey') + (Get-FogXaml 50)
+        # Fog: dense lines that almost hide the cloud.
+        $art = (Get-CloudXaml 6 2 1.0 'mid') + (Get-FogXaml @(34, 41, 48, 55, 62) 3.0 0.92)
     }
     elseif ($code -in @(51,53,55)) {
         $art = (Get-CloudXaml 6 6 1.0 'light') +
@@ -2579,34 +2652,60 @@ function Set-WeatherArt {
             (Get-RainXaml 18 47 2 14 8 2.2 $drizzleBlue $drizzleSeconds) + (Get-PelletXaml $pellets)
     }
     elseif ($code -in @(61,63,65)) {
-        $art = (Get-CloudXaml 6 6 1.0 'grey') +
+        $art = (Get-CloudXaml 6 6 1.0 $rainTone) +
             (Get-RainXaml $x0 46 $count $gap 12 $rainThick $rainBlue $rainSeconds)
     }
     elseif ($code -in @(66,67)) {
         $art = (Get-CloudXaml 6 6 1.0 'grey') +
             (Get-RainXaml 18 46 2 14 12 2.8 $rainBlue $rainSeconds) + (Get-PelletXaml $pellets)
     }
+    elseif ($code -eq 68) {
+        # Sleet: rain and wet snow together, from a full cloud.
+        $art = (Get-CloudXaml 6 6 1.0 $rainTone) +
+            (Get-DropsXaml $sleetDrops 46 11 2.6 $rainBlue $rainSeconds $false) +
+            (Get-FlurryXaml @(27, 53, 49, 56) 3.4)
+    }
+    elseif ($code -eq 69) {
+        # Sleet showers: the same with sun or moon, in bursts.
+        $art = (Get-SkyXaml $day 52 15 10) + (Get-CloudXaml 4 14 0.95 $rainTone) +
+            (Get-DropsXaml $sleetDrops 50 10 2.4 $rainBlue $rainSeconds $true) +
+            (Get-FlurryXaml @(27, 56, 49, 58) 3.4 $true)
+    }
     elseif ($code -in @(80,81,82)) {
-        $art = (Get-SkyXaml $day 52 15 10) + (Get-CloudXaml 4 14 0.95 'light') +
-            (Get-RainXaml $x0 50 $count $gap 11 ($rainThick - 0.2) $rainBlue $rainSeconds)
+        $art = (Get-SkyXaml $day 52 15 10) + (Get-CloudXaml 4 14 0.95 $rainTone) +
+            (Get-RainXaml $x0 50 $count $gap 11 ($rainThick - 0.2) $rainBlue $rainSeconds $true)
     }
     elseif ($code -in @(71,73,75)) {
-        $art = (Get-CloudXaml 6 6 1.0 'light') + (Get-SnowArt $level 0)
+        $art = (Get-CloudXaml 6 6 1.0 $snowTone) + (Get-SnowArt $level 0)
     }
     elseif ($code -eq 77) {
         $art = (Get-CloudXaml 6 6 1.0 'light') +
             (Get-GrainXaml @(16, 52, 24, 55, 32, 52, 40, 55, 48, 52, 56, 55) 1.2)
     }
     elseif ($code -in @(85,86)) {
-        $art = (Get-SkyXaml $day 52 15 10) + (Get-CloudXaml 4 14 0.95 'light') +
-            (Get-SnowArt $level 2)
+        $art = (Get-SkyXaml $day 52 15 10) + (Get-CloudXaml 4 14 0.95 $snowTone) +
+            (Get-SnowArt $level 2 $true)
     }
-    elseif ($code -eq 95) {
-        $art = (Get-CloudXaml 6 4 1.0 'dark') + (Get-BoltXaml 28 34)
+    elseif ($code -eq 961) {
+        # Thunder showers: sun, cloud, one bolt, a few drops in bursts.
+        $art = (Get-SkyXaml $day 52 15 10) + (Get-CloudXaml 4 14 0.95 'mid') +
+            (Get-BoltXaml 26 38) + (Get-DropsXaml @(14, 48) 52 10 2.4 $rainBlue 1.0 $true)
     }
-    elseif ($code -in @(96,99)) {
+    elseif ($code -eq 962) {
+        # Heavy thunder showers: darker cloud, stronger flicker, more rain.
+        $art = (Get-SkyXaml $day 52 15 10) + (Get-CloudXaml 4 14 0.95 'dark') +
+            (Get-BoltXaml 26 38 $true) + (Get-DropsXaml @(10, 16, 46, 54) 52 10 2.2 $rainBlue 0.7 $true)
+    }
+    elseif ($code -eq 964) {
+        # Heavy thunderstorm: two bolts flashing in turn, heavy rain.
+        $art = (Get-CloudXaml 6 4 1.0 'dark') + (Get-BoltXaml 16 34 $true 0) +
+            (Get-BoltXaml 40 34 $true 1.2) + (Get-DropsXaml @(10, 33, 58, 64) 44 12 2.2 $rainBlue 0.65 $false)
+    }
+    elseif ($code -in @(95,96,99)) {
+        # Thunderstorm: dark cloud, bolt and rain (with hail for 96/99).
         $art = (Get-CloudXaml 6 4 1.0 'dark') + (Get-BoltXaml 28 34) +
-            (Get-HailXaml @(14, 56, 56, 58))
+            (Get-DropsXaml @(14, 46, 56) 44 12 2.4 $rainBlue 1.0 $false)
+        if ($code -ne 95) { $art += Get-HailXaml @(14, 56, 56, 58) }
     }
     else {
         $art = '<Canvas Opacity="0.45">' + (Get-CloudXaml 6 16 1.0 'grey') + '</Canvas>'
@@ -2804,6 +2903,7 @@ function Get-WeatherDescription([int]$code) {
         1  { return 'Mainly clear' }
         2  { return 'Partly cloudy' }
         3  { return 'Overcast' }
+        10 { return 'Mist' }
         45 { return 'Fog' }
         48 { return 'Freezing fog' }
         51 { return 'Light drizzle' }
@@ -2816,6 +2916,8 @@ function Get-WeatherDescription([int]$code) {
         65 { return 'Heavy rain' }
         66 { return 'Freezing rain' }
         67 { return 'Freezing rain' }
+        68 { return 'Sleet' }
+        69 { return 'Sleet showers' }
         71 { return 'Light snow' }
         73 { return 'Snow' }
         75 { return 'Heavy snow' }
@@ -2826,33 +2928,66 @@ function Get-WeatherDescription([int]$code) {
         85 { return 'Snow showers' }
         86 { return 'Snow showers' }
         95 { return 'Thunderstorm' }
+        961 { return 'Thunder showers' }
+        962 { return 'Heavy thunder showers' }
+        964 { return 'Heavy thunderstorm' }
         96 { return 'Thunderstorm, hail' }
         99 { return 'Thunderstorm, hail' }
     }
     return 'Unknown conditions'
 }
 
+# Weather data always arrives in Celsius; it is shown in the unit chosen
+# under "Temperature unit" (Celsius by default).
+$script:lastTemp = $null    # last temperature shown, in Celsius
+$script:lastFeels = $null   # last "feels like" shown, in Celsius
+
+function ConvertTo-ShownTemperature([double]$celsius) {
+    if ($script:config.TempUnit -eq 'F') { return $celsius * 9 / 5 + 32 }
+    return $celsius
+}
+
+function Get-TemperatureUnitText { return $script:ch.Deg + [string]$script:config.TempUnit }
+
 function Format-Temperature($value) {
-    $n = [int][Math]::Round([double]$value, [MidpointRounding]::AwayFromZero)
+    $n = [int][Math]::Round((ConvertTo-ShownTemperature ([double]$value)), [MidpointRounding]::AwayFromZero)
     $text = [string][Math]::Abs($n)
     if ($n -lt 0) { $text = $script:ch.Minus + $text }
-    return $text + $script:ch.Deg + 'C'
+    return $text + (Get-TemperatureUnitText)
 }
 
 # Large number with a smaller, softer unit: "12" + "deg C".
 function Set-TemperatureDisplay($value) {
+    $script:lastTemp = $value
     if ($null -eq $value) {
         $script:tempText = '--'
         $ui.TempValue.Text = '--'
         $ui.TempUnit.Text = ''
         return
     }
-    $n = [int][Math]::Round([double]$value, [MidpointRounding]::AwayFromZero)
+    $n = [int][Math]::Round((ConvertTo-ShownTemperature ([double]$value)), [MidpointRounding]::AwayFromZero)
     $text = [string][Math]::Abs($n)
     if ($n -lt 0) { $text = $script:ch.Minus + $text }
     $script:tempText = $text
     $ui.TempValue.Text = $text
-    $ui.TempUnit.Text = $script:ch.Deg + 'C'
+    $ui.TempUnit.Text = Get-TemperatureUnitText
+}
+
+function Show-FeelsLike($value) {
+    if ($null -eq $value) { Set-FeelsDisplay ''; return }
+    Set-FeelsDisplay ('Feels like ' + (Format-Temperature $value))
+    $script:lastFeels = $value
+}
+
+# Switches between Celsius and Fahrenheit and redraws right away.
+function Set-TemperatureUnit([string]$unit) {
+    if ($unit -notin @('C','F') -or $unit -eq $script:config.TempUnit) { return }
+    $script:config.TempUnit = $unit
+    Save-Settings
+    Set-TemperatureDisplay $script:lastTemp
+    if ($null -ne $script:lastFeels) { Show-FeelsLike $script:lastFeels }
+    Update-SizeToContent
+    Move-ToSavedPosition
 }
 
 # Wind speed in m/s (whole numbers) and relative humidity in percent.
@@ -3006,6 +3141,7 @@ function Set-LocationDisplay {
 }
 
 function Set-FeelsDisplay([string]$text) {
+    if (-not $text) { $script:lastFeels = $null }
     $ui.FeelsText.Text = $text
 }
 
@@ -3092,7 +3228,9 @@ function Set-WeatherTooltip {
     if ($script:updateFailed -and $script:lastError) {
         $lines += "Last attempt failed: $($script:lastError)"
     }
-    $lines += 'Weather data: Open-Meteo. Refreshes every 15 minutes.'
+    $data = 'Open-Meteo'
+    if ($script:shownSource -eq 'FMI') { $data = 'Finnish Meteorological Institute (FMI), CC BY 4.0' }
+    $lines += "Weather data: $data. Refreshes every 15 minutes."
     $ui.UpdatedText.ToolTip = $lines -join "`n"
 }
 
@@ -3119,6 +3257,178 @@ function Register-WeatherFailure([string]$message) {
     Set-WeatherTooltip
 }
 
+# ------------------------------------------------------------
+# FMI (Finnish Meteorological Institute) weather for cities in Finland
+# ------------------------------------------------------------
+# FMI's open data (CC BY 4.0, no registration) gives the forecast for the
+# current hour at the city's exact coordinates: the forecast reviewed by
+# FMI's meteorologists, as shown on ilmatieteenlaitos.fi. If FMI cannot be
+# reached, Open-Meteo is used instead for the next 30 minutes.
+
+$script:weatherSource = 'Open-Meteo'   # source of the request in progress
+$script:shownSource = 'Open-Meteo'     # source of the weather on screen
+$script:fmiPausedUntil = [DateTime]::MinValue
+$script:fmiPlainQuery = $false         # true if FMI refused the time window
+$script:levelHint = $null              # FMI's own light/moderate/heavy
+
+# FMI WeatherSymbol3 -> widget weather code (for the icon) and FMI's wording.
+# The widget's own codes: 10 mist, 68 sleet, 69 sleet showers,
+# 961 thunder showers, 962 heavy thunder showers, 964 heavy thunderstorm.
+$script:fmiSymbols = @{
+    1  = @(0,  'Clear');               2  = @(2,  'Partly cloudy');       3  = @(3,  'Cloudy')
+    21 = @(80, 'Light rain showers');  22 = @(81, 'Rain showers');        23 = @(82, 'Heavy rain showers')
+    31 = @(61, 'Light rain');          32 = @(63, 'Rain');                33 = @(65, 'Heavy rain')
+    41 = @(85, 'Light snow showers');  42 = @(85, 'Snow showers');        43 = @(86, 'Heavy snow showers')
+    51 = @(71, 'Light snow');          52 = @(73, 'Snow');                53 = @(75, 'Heavy snow')
+    61 = @(961, 'Thunder showers');    62 = @(962, 'Heavy thunder showers')
+    63 = @(95, 'Thunderstorm');        64 = @(964, 'Heavy thunderstorm')
+    71 = @(69, 'Light sleet showers'); 72 = @(69, 'Sleet showers');       73 = @(69, 'Heavy sleet showers')
+    81 = @(68, 'Light sleet');         82 = @(68, 'Sleet');               83 = @(68, 'Heavy sleet')
+    91 = @(10, 'Mist');                92 = @(45, 'Fog')
+}
+
+function Test-UseFmi($city) {
+    if ($null -eq $city) { return $false }
+    if ((Get-Date) -lt $script:fmiPausedUntil) { return $false }
+    return (Get-CountryCode $city) -eq 'FI'
+}
+
+function Get-FmiUrl([string]$lat, [string]$lon) {
+    $url = 'https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0&request=getFeature' +
+        '&storedquery_id=fmi::forecast::edited::weather::scandinavia::point::simple' +
+        "&latlon=$lat,$lon&timestep=60" +
+        '&parameters=Temperature,Humidity,WindSpeedMS,WeatherSymbol3,Precipitation1h'
+    if (-not $script:fmiPlainQuery) {
+        # Only the current and next hour, to keep the answer small.
+        $hour = [DateTime]::UtcNow
+        $hour = New-Object DateTime -ArgumentList $hour.Year, $hour.Month, $hour.Day, $hour.Hour, 0, 0, ([DateTimeKind]::Utc)
+        $url += '&starttime=' + $hour.ToString('yyyy-MM-ddTHH:mm:ssZ', $script:invariant) +
+            '&endtime=' + $hour.AddHours(2).ToString('yyyy-MM-ddTHH:mm:ssZ', $script:invariant)
+    }
+    return $url
+}
+
+# Whether the sun is up (above the horizon, refraction included) at the
+# given place and UTC time. Standard NOAA approximation, accurate to minutes.
+function Test-Daylight([double]$latitude, [double]$longitude, [DateTime]$utc) {
+    $hour = $utc.Hour + $utc.Minute / 60.0
+    $g = 2 * [Math]::PI / 365 * ($utc.DayOfYear - 1 + ($hour - 12) / 24)
+    $declination = 0.006918 - 0.399912 * [Math]::Cos($g) + 0.070257 * [Math]::Sin($g) -
+        0.006758 * [Math]::Cos(2 * $g) + 0.000907 * [Math]::Sin(2 * $g) -
+        0.002697 * [Math]::Cos(3 * $g) + 0.00148 * [Math]::Sin(3 * $g)
+    $equation = 229.18 * (0.000075 + 0.001868 * [Math]::Cos($g) - 0.032077 * [Math]::Sin($g) -
+        0.014615 * [Math]::Cos(2 * $g) - 0.040849 * [Math]::Sin(2 * $g))
+    $solarMinutes = $hour * 60 + $equation + 4 * $longitude
+    $hourAngle = ($solarMinutes / 4 - 180) * [Math]::PI / 180
+    $lat = $latitude * [Math]::PI / 180
+    $sinElevation = [Math]::Sin($lat) * [Math]::Sin($declination) +
+        [Math]::Cos($lat) * [Math]::Cos($declination) * [Math]::Cos($hourAngle)
+    $elevation = [Math]::Asin([Math]::Max(-1.0, [Math]::Min(1.0, $sinElevation))) * 180 / [Math]::PI
+    return $elevation -gt -0.833
+}
+
+# "Feels like": wind chill when cold and windy, heat index when hot and
+# humid (the usual meteorological formulas), otherwise the temperature.
+function Get-FeelsLike([double]$temperature, [double]$wind, [double]$humidity) {
+    $kmh = $wind * 3.6
+    if ($temperature -le 10 -and $kmh -ge 4.8) {
+        $v = [Math]::Pow($kmh, 0.16)
+        return 13.12 + 0.6215 * $temperature - 11.37 * $v + 0.3965 * $temperature * $v
+    }
+    if ($temperature -ge 27 -and $humidity -ge 40) {
+        $f = $temperature * 9 / 5 + 32
+        $h = $humidity
+        $index = -42.379 + 2.04901523 * $f + 10.14333127 * $h - 0.22475541 * $f * $h -
+            0.00683783 * $f * $f - 0.05481717 * $h * $h + 0.00122874 * $f * $f * $h +
+            0.00085282 * $f * $h * $h - 0.00000199 * $f * $f * $h * $h
+        return ($index - 32) * 5 / 9
+    }
+    return $temperature
+}
+
+# Turns FMI's answer (XML) into the same shape as Open-Meteo's "current"
+# block, plus FMI's own description and intensity. Throws if unusable.
+function ConvertFrom-FmiForecast([string]$text, $city) {
+    $xml = [xml]$text
+    $items = $xml.SelectNodes("//*[local-name()='BsWfsElement']")
+    if ($null -eq $items -or $items.Count -eq 0) { throw 'FMI returned no forecast for this place.' }
+
+    $byTime = @{}
+    foreach ($item in $items) {
+        $timeText = $item.SelectSingleNode("*[local-name()='Time']").InnerText
+        $name = $item.SelectSingleNode("*[local-name()='ParameterName']").InnerText
+        $valueText = $item.SelectSingleNode("*[local-name()='ParameterValue']").InnerText
+        $time = [DateTime]::Parse($timeText, $script:invariant,
+            [Globalization.DateTimeStyles]::AdjustToUniversal)
+        if (-not $byTime.ContainsKey($time)) { $byTime[$time] = @{} }
+        $number = 0.0
+        if ([double]::TryParse($valueText, [Globalization.NumberStyles]::Float, $script:invariant, [ref]$number) -and
+            -not [double]::IsNaN($number)) {
+            $byTime[$time][$name] = $number
+        }
+    }
+
+    $now = [DateTime]::UtcNow
+    $nearest = $byTime.Keys | Sort-Object { [Math]::Abs(($_ - $now).TotalMinutes) } | Select-Object -First 1
+    $values = $byTime[$nearest]
+    if (-not $values.ContainsKey('Temperature') -or -not $values.ContainsKey('WeatherSymbol3')) {
+        throw 'The FMI forecast for this hour is incomplete.'
+    }
+
+    $symbol = [int]$values['WeatherSymbol3']
+    if (-not $script:fmiSymbols.ContainsKey($symbol)) { throw "Unknown FMI weather symbol $symbol." }
+    $code = [int]$script:fmiSymbols[$symbol][0]
+    $description = [string]$script:fmiSymbols[$symbol][1]
+
+    $temperature = [double]$values['Temperature']
+    $wind = $null
+    $humidity = $null
+    if ($values.ContainsKey('WindSpeedMS')) { $wind = [double]$values['WindSpeedMS'] }
+    if ($values.ContainsKey('Humidity')) { $humidity = [double]$values['Humidity'] }
+    $feels = $temperature
+    if ($null -ne $wind) {
+        $h = 50.0
+        if ($null -ne $humidity) { $h = $humidity }
+        $feels = Get-FeelsLike $temperature $wind $h
+    }
+
+    # Precipitation1h is millimetres of water in the hour. For snow, the
+    # usual ratio of about 0.7 cm of snow per millimetre is used.
+    $amount = 0.0
+    if ($values.ContainsKey('Precipitation1h')) { $amount = [double]$values['Precipitation1h'] }
+    $rain = $amount
+    $snow = 0.0
+    if ($symbol -ge 41 -and $symbol -le 53) { $rain = 0.0; $snow = $amount * 0.7 }
+
+    $level = $null
+    if ($symbol -ge 21 -and $symbol -le 83 -and -not ($symbol -ge 61 -and $symbol -le 64)) {
+        $level = [Math]::Max(1, [Math]::Min(3, $symbol % 10))
+    }
+
+    $day = 0
+    if (Test-Daylight ([double]$city.Latitude) ([double]$city.Longitude) $now) { $day = 1 }
+
+    return [pscustomobject]@{
+        temperature_2m       = $temperature
+        apparent_temperature = $feels
+        weather_code         = $code
+        is_day               = $day
+        wind_speed_10m       = $wind
+        relative_humidity_2m = $humidity
+        rain                 = $rain
+        showers              = 0.0
+        snowfall             = $snow
+        interval             = 3600
+        description          = $description
+        level                = $level
+    }
+}
+
+function Get-WeatherCredit {
+    if ($script:shownSource -eq 'FMI') { return 'Weather by FMI (Finnish Meteorological Institute)' }
+    return 'Weather by Open-Meteo'
+}
+
 function Start-Weather {
     if ($null -eq $script:config.City) { return }
     if ($null -ne $script:weatherTask) { return }
@@ -3129,6 +3439,7 @@ function Start-Weather {
         # Test mode: the made-up values arrive as if Open-Meteo had sent them.
         $source = New-Object 'System.Threading.Tasks.TaskCompletionSource[string]'
         $source.SetResult([string]$script:testWeatherJson)
+        $script:weatherSource = 'Test'
         $script:weatherTask = $source.Task
         Update-WeatherStatus
         return
@@ -3137,11 +3448,18 @@ function Start-Weather {
     $lat = ([double]$script:weatherCity.Latitude).ToString($script:invariant)
     $lon = ([double]$script:weatherCity.Longitude).ToString($script:invariant)
 
-    $url = 'https://api.open-meteo.com/v1/forecast' +
-        "?latitude=$lat&longitude=$lon" +
-        '&current=temperature_2m,apparent_temperature,weather_code,is_day,' +
-        'wind_speed_10m,relative_humidity_2m,rain,showers,snowfall' +
-        '&temperature_unit=celsius&wind_speed_unit=ms&timezone=auto'
+    if (Test-UseFmi $script:weatherCity) {
+        $script:weatherSource = 'FMI'
+        $url = Get-FmiUrl $lat $lon
+    }
+    else {
+        $script:weatherSource = 'Open-Meteo'
+        $url = 'https://api.open-meteo.com/v1/forecast' +
+            "?latitude=$lat&longitude=$lon" +
+            '&current=temperature_2m,apparent_temperature,weather_code,is_day,' +
+            'wind_speed_10m,relative_humidity_2m,rain,showers,snowfall' +
+            '&temperature_unit=celsius&wind_speed_unit=ms&timezone=auto'
+    }
 
     try {
         $script:weatherTask = $script:http.GetStringAsync($url)
@@ -3172,7 +3490,12 @@ function Complete-Weather {
 
     try {
         $json = $task.GetAwaiter().GetResult()
-        $current = (ConvertFrom-Json -InputObject $json).current
+        if ($script:weatherSource -eq 'FMI') {
+            $current = ConvertFrom-FmiForecast $json $script:weatherCity
+        }
+        else {
+            $current = (ConvertFrom-Json -InputObject $json).current
+        }
 
         if ($null -eq $current -or $null -eq $current.temperature_2m -or
             $null -eq $current.weather_code) {
@@ -3198,15 +3521,24 @@ function Complete-Weather {
         }
         if ($null -ne $current.snowfall) { $script:snowRate = [double]$current.snowfall / $hours }
 
+        # FMI's own light/moderate/heavy, used when it reports no amount.
+        $script:levelHint = $null
+        if ($null -ne $current.level) { $script:levelHint = [int]$current.level }
+
         $description = Get-WeatherDescription $script:weatherCode
+        if ($null -ne $current.description) { $description = [string]$current.description }
         if ($script:weatherCode -eq 0 -and $script:isDay -eq 0) { $description = 'Clear night' }
+
+        $script:shownSource = 'Open-Meteo'
+        if ($script:weatherSource -eq 'FMI') { $script:shownSource = 'FMI' }
+        $creditMenu.Header = Get-WeatherCredit
 
         Set-TemperatureDisplay $current.temperature_2m
         Set-WindHumidityDisplay $current.wind_speed_10m $current.relative_humidity_2m
         $ui.ConditionText.Text = $description
 
         if ($null -ne $current.apparent_temperature) {
-            Set-FeelsDisplay ('Feels like ' + (Format-Temperature $current.apparent_temperature))
+            Show-FeelsLike $current.apparent_temperature
         }
         else {
             Set-FeelsDisplay ''
@@ -3225,7 +3557,23 @@ function Complete-Weather {
         Update-SizeToContent
     }
     catch {
-        Register-WeatherFailure (Get-ErrorText $_.Exception)
+        $message = Get-ErrorText $_.Exception
+        if ($script:weatherSource -eq 'FMI') {
+            if (-not $script:fmiPlainQuery -and $message -match '400') {
+                # FMI refused the time window: ask again without it.
+                $script:fmiPlainQuery = $true
+                Write-Log "FMI refused the time window, retrying without it: $message"
+            }
+            else {
+                # FMI unavailable: Open-Meteo for the next 30 minutes.
+                $script:fmiPausedUntil = (Get-Date).AddMinutes(30)
+                Write-Log "FMI weather unavailable, using Open-Meteo for 30 minutes: $message"
+            }
+            $script:nextWeather = [DateTime]::MinValue
+            Update-WeatherStatus
+            return
+        }
+        Register-WeatherFailure $message
     }
 
     Update-WeatherStatus
@@ -4048,6 +4396,18 @@ $clock24Item.IsCheckable = $true
 [void]$timeMenu.Items.Add($clock24Item)
 [void]$menu.Items.Add($timeMenu)
 
+$unitMenu = New-MenuItem 'Temperature unit' $null
+foreach ($option in @(@('C', "Celsius ($($script:ch.Deg)C)"), @('F', "Fahrenheit ($($script:ch.Deg)F)"))) {
+    $item = New-MenuItem $option[1] {
+        param($sender, $e)
+        Set-TemperatureUnit ([string]$sender.Tag)
+    }
+    $item.Tag = $option[0]
+    $item.IsCheckable = $true
+    [void]$unitMenu.Items.Add($item)
+}
+[void]$menu.Items.Add($unitMenu)
+
 $animateItem = New-MenuItem 'Animate weather icons' {
     $script:config.AnimateIcons = [bool]$animateItem.IsChecked
     Save-Settings
@@ -4131,7 +4491,7 @@ $installInfo.IsEnabled = $false
 }))
 [void]$menu.Items.Add($diagnosticsMenu)
 
-$creditMenu = New-MenuItem 'Weather by Open-Meteo' $null
+$creditMenu = New-MenuItem (Get-WeatherCredit) $null
 $creditMenu.IsEnabled = $false
 [void]$menu.Items.Add($creditMenu)
 [void]$menu.Items.Add((New-MenuItem 'Close widget' { $window.Close() }))
@@ -4150,6 +4510,7 @@ $menu.Add_Opened({
     $sizeMenu.IsEnabled = $script:config.Show -eq 'Both'
     $secondsItem.IsChecked = [bool]$script:config.ShowSeconds
     $clock24Item.IsChecked = [bool]$script:config.Use24h
+    foreach ($entry in $unitMenu.Items) { $entry.IsChecked = ($entry.Tag -eq $script:config.TempUnit) }
 
     $onText = 'temporary fallback'
     if ([DesktopClockNative]::OnPreferred) { $onText = 'preferred' }
