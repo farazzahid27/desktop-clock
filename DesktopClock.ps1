@@ -1380,7 +1380,6 @@ function Set-WeatherSizing([string]$mode) {
         $ui.TempUnit.FontSize = 20
         $ui.TempValue.FontSize = $ui.TimeText.FontSize
         $indent = 10
-        Update-ArtSize
     }
     Update-UnitAlignment
 
@@ -1389,6 +1388,31 @@ function Set-WeatherSizing([string]$mode) {
     $feelsMargin = New-Object Windows.Thickness -ArgumentList 0
     if ($ui.TemperatureText.Margin -ne $tempMargin) { $ui.TemperatureText.Margin = $tempMargin }
     if ($ui.FeelsText.Margin -ne $feelsMargin) { $ui.FeelsText.Margin = $feelsMargin }
+
+    if ($mode -eq 'Weather') { Update-WeatherOnlySize }
+    elseif ($mode -ne 'Wide') { Update-ArtSize }
+}
+
+# Weather only: no clock sets the width, so the card fits the weather
+# itself - temperature, a fixed 12 px gap, then the icon at the right edge.
+# The icon is sized in proportion to the temperature number.
+$script:weatherOnlyWidth = 200.0
+
+function Update-WeatherOnlySize {
+    $size = [Math]::Max(72.0, [Math]::Min(112.0, [Math]::Round([double]$ui.TempValue.FontSize * 1.35)))
+    $height = [Math]::Round($size * 0.86)
+    if ($ui.WeatherArt.Width -ne $size) {
+        $ui.WeatherArt.Width = $size
+        $ui.WeatherArt.Height = $height
+    }
+
+    $infinite = [double]::PositiveInfinity
+    $widest = 0.0
+    foreach ($name in @('TemperatureRow','LocationText')) {
+        $ui[$name].Measure((New-Size $infinite $infinite))
+        $widest = [Math]::Max($widest, [double]$ui[$name].DesiredSize.Width)
+    }
+    $script:weatherOnlyWidth = [Math]::Ceiling($widest) + 1
 }
 
 # Shapes: Wide / Narrow (clock and weather), Clock (clock only),
@@ -1504,7 +1528,7 @@ function Get-MinimumHeight([string]$mode, [double]$width) {
         return 2 * $script:padY + (Measure-Height $ui.ClockStack $script:clockBlockWidth) + 2
     }
     if ($mode -eq 'Weather') {
-        return 2 * $script:padY + (Measure-Height $ui.WeatherStack $script:stackedWidth) + 2
+        return 2 * $script:padY + (Measure-Height $ui.WeatherStack $script:weatherOnlyWidth) + 2
     }
 
     $inner = $script:stackedWidth   # stacked content width (normally the time's width)
@@ -1579,7 +1603,8 @@ function Set-WidgetSize {
     }
     elseif ($script:config.Show -eq 'Weather') {
         $mode = 'Weather'
-        $w = $narrowWidth
+        Set-WeatherSizing 'Weather'
+        $w = 2 * $script:padX + $script:weatherOnlyWidth
     }
     else {
         $wideWidth = Get-WideWidth
@@ -1599,8 +1624,12 @@ function Set-WidgetSize {
     # Stacked: lock the content to the width of the time, so the weather icon
     # ends exactly under the last digit of the seconds. If the square card is
     # wider than that, the content is centred with equal side margins.
-    if ($mode -in @('Narrow','Weather')) {
+    if ($mode -eq 'Narrow') {
         if ($ui.ContentGrid.Width -ne $script:stackedWidth) { $ui.ContentGrid.Width = $script:stackedWidth }
+        $ui.ContentGrid.HorizontalAlignment = 'Center'
+    }
+    elseif ($mode -eq 'Weather') {
+        if ($ui.ContentGrid.Width -ne $script:weatherOnlyWidth) { $ui.ContentGrid.Width = $script:weatherOnlyWidth }
         $ui.ContentGrid.HorizontalAlignment = 'Center'
     }
     else {
