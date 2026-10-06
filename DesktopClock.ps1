@@ -1575,6 +1575,7 @@ $script:timeWidth = 180.0
 $script:padX = 10.0   # left and right
 $script:padY = 8.0    # top and bottom
 $script:stackedWidth = 226.0
+$script:stackedContentWidth = 226.0   # stackedWidth, or wider if the weather needs it
 
 function New-Size([double]$width, [double]$height) {
     New-Object Windows.Size -ArgumentList $width, $height
@@ -1713,7 +1714,7 @@ function Update-ArtSize {
     $left = [Math]::Max($temperature, [double]$ui.FeelsText.DesiredSize.Width)
     $ui.WeatherStats.Measure((New-Size $infinite $infinite))
     $stats = [double]$ui.WeatherStats.DesiredSize.Width
-    $available = $script:stackedWidth - $left - $stats - 12 + 5
+    $available = $script:stackedContentWidth - $left - $stats - 12 + 5
     $size = [Math]::Max(40.0, [Math]::Min(112.0, [Math]::Floor($available)))
     $height = [Math]::Round($size * 0.86)
     if ($ui.WeatherArt.Width -ne $size) {
@@ -1925,6 +1926,26 @@ function Get-WideWidth {
     return 2 * $script:padX + $script:clockWidth + 29.0 + $widest + 1.0
 }
 
+# Stacked content width: the width of the time, unless the weather row
+# needs more. Without seconds the time is short, and the temperature,
+# "Feels like", wind/humidity and the icon would not fit: then the widget
+# widens just enough for them, with an icon of at least 64 px, instead of
+# cutting off the temperature.
+function Get-StackedContentWidth {
+    $infinite = [double]::PositiveInfinity
+    $script:stackedContentWidth = $script:stackedWidth
+    if ($script:layoutMode -ne 'Narrow') { Set-WeatherSizing 'Narrow' }
+
+    $ui.TemperatureText.Measure((New-Size $infinite $infinite))
+    $ui.FeelsText.Measure((New-Size $infinite $infinite))
+    $ui.WeatherStats.Measure((New-Size $infinite $infinite))
+    $left = [Math]::Max([double]$ui.TemperatureText.DesiredSize.Width, [double]$ui.FeelsText.DesiredSize.Width)
+    $needed = [Math]::Ceiling($left + [double]$ui.WeatherStats.DesiredSize.Width + 7 + 64 + 1)
+
+    if ($script:layoutMode -ne 'Narrow' -and $script:layoutMode) { Set-WeatherSizing $script:layoutMode }
+    return [Math]::Max([double]$script:stackedWidth, [double]$needed)
+}
+
 # The top line of each layout keeps clear of the corner controls:
 # wide -> location line (top of the weather column), stacked -> date line.
 # The corner buttons overlay the text while the pointer is in the corner,
@@ -1952,7 +1973,7 @@ function Get-MinimumHeight([string]$mode, [double]$width) {
         return 2 * $script:padY + (Measure-Height $ui.WeatherStack $script:weatherOnlyWidth) + 2
     }
 
-    $inner = $script:stackedWidth   # stacked content width (normally the time's width)
+    $inner = $script:stackedContentWidth   # stacked content width (normally the time's width)
     $clock = Measure-Height $ui.ClockStack $inner
     $weather = Measure-Height $ui.WeatherStack $inner
     return 2 * $script:padY + $clock + 8 + 1 + 8 + $weather + 2
@@ -2017,6 +2038,10 @@ function Set-WidgetSize {
     #   wide    -> ends where the weather text (e.g. "Feels like 10 C") ends
     # Dragging the grip switches layout at the midpoint between the two.
     $narrowWidth = [double]$script:narrowMinWidth
+    if ($script:config.Show -eq 'Both') {
+        $script:stackedContentWidth = Get-StackedContentWidth
+        $narrowWidth = 2 * $script:padX + $script:stackedContentWidth
+    }
 
     if ($script:config.Show -eq 'Clock') {
         $mode = 'Clock'
@@ -2046,7 +2071,7 @@ function Set-WidgetSize {
     # ends exactly under the last digit of the seconds. If the square card is
     # wider than that, the content is centred with equal side margins.
     if ($mode -eq 'Narrow') {
-        if ($ui.ContentGrid.Width -ne $script:stackedWidth) { $ui.ContentGrid.Width = $script:stackedWidth }
+        if ($ui.ContentGrid.Width -ne $script:stackedContentWidth) { $ui.ContentGrid.Width = $script:stackedContentWidth }
         $ui.ContentGrid.HorizontalAlignment = 'Center'
     }
     elseif ($mode -eq 'Weather') {
