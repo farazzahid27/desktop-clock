@@ -2898,17 +2898,42 @@ function Update-WindFlow {
     }
 }
 
-# The droplet is filled up to the humidity level; with animation on, the
-# water line gently rises and falls around that level.
+# Where the water line sits, as a fraction of the droplet's height measured
+# from the top, so that the water covers the given share of the droplet's
+# AREA. The droplet is narrow at the top and wide at the bottom, so filling
+# by height made 50 % look almost full; filling by area looks right.
+function Get-DropletLine([double]$level) {
+    if ($level -le 0) { return 1.0 }
+    if ($level -ge 1) { return 0.0 }
+    $shape = $ui.HumidityPath.Data
+    $box = $shape.Bounds
+    $total = $shape.GetArea()
+    if ($total -le 0) { return 1.0 - $level }
+
+    $low = 0.0
+    $high = 1.0
+    for ($i = 0; $i -lt 16; $i++) {
+        $middle = ($low + $high) / 2
+        $y = $box.Top + $box.Height * $middle
+        $below = New-Object Windows.Media.RectangleGeometry -ArgumentList (
+            New-Object Windows.Rect -ArgumentList $box.Left, $y, $box.Width, ($box.Bottom - $y))
+        $filled = [Windows.Media.Geometry]::Combine($shape, $below,
+            [Windows.Media.GeometryCombineMode]::Intersect, $null).GetArea()
+        if ($filled / $total -gt $level) { $low = $middle } else { $high = $middle }
+    }
+    return ($low + $high) / 2
+}
+
+# The droplet is filled with blue water up to the humidity level (by area);
+# with animation on, the water line gently rises and falls a little.
 function Update-HumidityFill {
     $path = $ui.HumidityPath
     if ($null -eq $script:humidity) { $path.Fill = $null; return }
 
     $level = [Math]::Max(0.0, [Math]::Min(1.0, $script:humidity / 100.0))
-    $top = 1.0 - $level
-    $c = $script:statsColor
-    $water = [Windows.Media.Color]::FromArgb(110, $c.R, $c.G, $c.B)
-    $clear = [Windows.Media.Color]::FromArgb(0, $c.R, $c.G, $c.B)
+    $top = Get-DropletLine $level
+    $water = [Windows.Media.Color]::FromArgb(215, 0x3A, 0xA2, 0xEE)
+    $clear = [Windows.Media.Color]::FromArgb(0, 0x3A, 0xA2, 0xEE)
 
     $brush = New-Object Windows.Media.LinearGradientBrush
     $brush.StartPoint = New-Object Windows.Point -ArgumentList 0, 0
@@ -2920,10 +2945,10 @@ function Update-HumidityFill {
     $brush.GradientStops.Add($edgeWater)
     $brush.GradientStops.Add((New-Object Windows.Media.GradientStop -ArgumentList $water, 1.0))
 
-    if ($script:config.AnimateIcons -and $level -gt 0.08 -and $level -lt 0.92) {
+    if ($script:config.AnimateIcons -and $level -gt 0.05 -and $level -lt 0.95) {
         foreach ($stop in @($edgeClear, $edgeWater)) {
             $stop.BeginAnimation([Windows.Media.GradientStop]::OffsetProperty,
-                (New-ArtAnimation ($top - 0.07) ($top + 0.07) 2.6 $true 0))
+                (New-ArtAnimation ([Math]::Max(0.0, $top - 0.035)) ([Math]::Min(1.0, $top + 0.035)) 2.6 $true 0))
         }
     }
     $path.Fill = $brush
