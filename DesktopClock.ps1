@@ -1178,6 +1178,7 @@ $script:weatherMinWidth = 160.0
 $script:controlReserve = 46.0
 $script:dateWidth = 130.0
 $script:timeWidth = 180.0
+$script:stackedWidth = 226.0
 
 function New-Size([double]$width, [double]$height) {
     New-Object Windows.Size -ArgumentList $width, $height
@@ -1218,7 +1219,8 @@ function Update-Metrics {
     $base = [double]$ui.TimeText.DesiredSize.Width
     $target = [Math]::Max($base, $script:dateWidth + $script:controlReserve)
     if ($base -gt 0) {
-        $ui.TimeText.FontSize = [Math]::Min(66.0, 54.0 * $target / $base)
+        # +2 px margin so rounding can never trim the header.
+        $ui.TimeText.FontSize = [Math]::Min(84.0, 54.0 * ($target + 2) / $base)
     }
     $ui.TimeText.Measure((New-Size $infinite $infinite))
     $timeWidth = [double]$ui.TimeText.DesiredSize.Width
@@ -1234,7 +1236,12 @@ function Update-Metrics {
     # Stacked layout is exactly as wide as the clock block: the end of the
     # time is the right edge of the whole widget.
     # (Widened only if today's date plus the corner controls would not fit.)
-    $script:narrowMinWidth = 32.0 + $script:timeWidth
+    # Stacked content width: the time, unless the header (plus room for the
+    # corner buttons) is still wider - then the header wins, so the date and
+    # week number are never cut off.
+    $script:stackedWidth = [Math]::Ceiling([Math]::Max($script:timeWidth,
+        $script:dateWidth + $script:controlReserve))
+    $script:narrowMinWidth = 32.0 + $script:stackedWidth
 }
 
 # Places the top of the degree-C unit level with the top of the digits. In WPF the
@@ -1261,7 +1268,7 @@ function Update-ArtSize {
     $infinite = [double]::PositiveInfinity
     $ui.TemperatureText.Measure((New-Size $infinite $infinite))
     $temperature = [double]$ui.TemperatureText.DesiredSize.Width
-    $available = $script:timeWidth - $temperature - 12 + 5
+    $available = $script:stackedWidth - $temperature - 12 + 5
     $size = [Math]::Max(72.0, [Math]::Min(112.0, [Math]::Floor($available)))
     $height = [Math]::Round($size * 0.86)
     if ($ui.WeatherArt.Width -ne $size) {
@@ -1383,7 +1390,7 @@ function Get-MinimumHeight([string]$mode, [double]$width) {
         return 28.0 + [Math]::Max([double]$clock, [double]$weather) + 2.0
     }
 
-    $inner = $script:timeWidth   # stacked content is exactly the width of the time
+    $inner = $script:stackedWidth   # stacked content width (normally the time's width)
     $clock = Measure-Height $ui.ClockStack $inner
     $weather = Measure-Height $ui.WeatherStack $inner
     return 28.0 + $clock + 8 + 1 + 8 + $weather + 2
@@ -1466,7 +1473,7 @@ function Set-WidgetSize {
     # ends exactly under the last digit of the seconds. If the square card is
     # wider than that, the content is centred with equal side margins.
     if ($mode -eq 'Narrow') {
-        if ($ui.ContentGrid.Width -ne $script:timeWidth) { $ui.ContentGrid.Width = $script:timeWidth }
+        if ($ui.ContentGrid.Width -ne $script:stackedWidth) { $ui.ContentGrid.Width = $script:stackedWidth }
         $ui.ContentGrid.HorizontalAlignment = 'Center'
     }
     else {
