@@ -59,7 +59,7 @@ Add-Type -AssemblyName System.Windows.Forms
 # ---- Version and update source --------------------------------------------
 # Raise AppVersion before publishing a new GitHub release with a higher tag
 # (e.g. AppVersion 1.1.0 -> release tag v1.1.0).
-$script:AppVersion = [version]'1.0.3'
+$script:AppVersion = [version]'1.0.4'
 $script:UpdateRepo = 'farazzahid27/desktop-clock'
 # Name shown to users. File, folder and repository names stay "DesktopClock"
 # so updates and settings keep working.
@@ -3458,8 +3458,13 @@ function ConvertFrom-FmiForecast([string]$text, $city) {
 
 # ---- Measurements from FMI weather stations ------------------------------
 # ilmatieteenlaitos.fi shows the latest station measurements for the current
-# temperature, humidity and wind, so the widget does too: from the nearest
-# station within 25 km that has measured that value in the last 90 minutes.
+# temperature, humidity and wind, so the widget does too, using the stations
+# within 25 km that measured in the last 90 minutes:
+#   temperature, humidity: the median of those stations, so one unusual
+#                          station (lake island, coast, tower) cannot skew it
+#   wind:                  the lowest reading, because exposed stations
+#                          (e.g. Tampere Siilinkari on lake Nasijarvi) measure
+#                          far more wind than there is in town
 # The condition, icon and precipitation still come from the forecast.
 
 $script:fmiObsTask = $null
@@ -3468,8 +3473,12 @@ $script:obsInfo = $null   # "measured N km away" for the tooltip
 function Get-FmiObservationUrl($city) {
     $lat = [double]$city.Latitude
     $lon = [double]$city.Longitude
+    # A box reaching at least 25 km in every direction at any latitude
+    # (degrees of longitude get shorter towards the north).
+    $dLat = 0.23
+    $dLon = 25.5 / (111.32 * [Math]::Max(0.2, [Math]::Cos($lat * [Math]::PI / 180)))
     $box = [string]::Format($script:invariant, '{0:0.####},{1:0.####},{2:0.####},{3:0.####}',
-        $lon - 0.45, $lat - 0.22, $lon + 0.45, $lat + 0.22)
+        $lon - $dLon, $lat - $dLat, $lon + $dLon, $lat + $dLat)
     $since = [DateTime]::UtcNow.AddMinutes(-90).ToString('yyyy-MM-ddTHH:mm:00Z', $script:invariant)
     return 'https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0&request=getFeature' +
         '&storedquery_id=fmi::observations::weather::simple' +
@@ -3485,9 +3494,9 @@ function Get-DistanceKm([double]$lat1, [double]$lon1, [double]$lat2, [double]$lo
     return 6371 * 2 * [Math]::Atan2([Math]::Sqrt($a), [Math]::Sqrt(1 - $a))
 }
 
-# Latest valid measurement of each value from the nearest station that has
-# it. Returns @{ t2m = @{ Value; Km }; rh = ...; ws_10min = ... } (each
-# entry only if found).
+# Latest valid measurement of each value at each station, combined as
+# described above. Returns @{ t2m = @{ Value; Stations }; rh = ...;
+# ws_10min = ... } (each entry only if at least one station has it).
 function ConvertFrom-FmiObservations([string]$text, $city) {
     $xml = [xml]$text
     $latest = @{}   # "position|parameter" -> @{ Time; Value; Position }
@@ -3506,7 +3515,7 @@ function ConvertFrom-FmiObservations([string]$text, $city) {
         }
     }
 
-    $result = @{}
+    $byName = @{}   # parameter -> list of values from stations within 25 km
     $oldest = [DateTime]::UtcNow.AddMinutes(-90)
     foreach ($entry in $latest.GetEnumerator()) {
         $name = ($entry.Key -split '\|')[1]
@@ -3516,9 +3525,24 @@ function ConvertFrom-FmiObservations([string]$text, $city) {
         $km = Get-DistanceKm ([double]$city.Latitude) ([double]$city.Longitude) `
             ([double]::Parse($parts[0], $script:invariant)) ([double]::Parse($parts[1], $script:invariant))
         if ($km -gt 25) { continue }
-        if (-not $result.ContainsKey($name) -or $result[$name].Km -gt $km) {
-            $result[$name] = @{ Value = $found.Value; Km = $km }
+        if (-not $byName.ContainsKey($name)) { $byName[$name] = New-Object System.Collections.ArrayList }
+        [void]$byName[$name].Add([double]$found.Value)
+    }
+
+    $result = @{}
+    foreach ($name in $byName.Keys) {
+        $values = @($byName[$name] | Sort-Object)
+        if ($values.Count -eq 0) { continue }
+        if ($name -eq 'ws_10min') {
+            $value = $values[0]   # lowest: the least exposed station
         }
+        elseif ($values.Count % 2 -eq 1) {
+            $value = $values[[int](($values.Count - 1) / 2)]
+        }
+        else {
+            $value = ($values[$values.Count / 2 - 1] + $values[$values.Count / 2]) / 2
+        }
+        $result[$name] = @{ Value = $value; Stations = $values.Count }
     }
     return $result
 }
@@ -3531,7 +3555,22 @@ function Merge-FmiObservations($current, [hashtable]$measured) {
     $forecastTemperature = [double]$current.temperature_2m
     if ($measured.ContainsKey('t2m')) { $current.temperature_2m = $measured['t2m'].Value }
     if ($measured.ContainsKey('rh')) { $current.relative_humidity_2m = $measured['rh'].Value }
-    if ($measured.ContainsKey('ws_10min')) { $current.wind_speed_10m = $measured['ws_10min'].Value }
+    if ($measured.ContainsKey('ws_10min')) {
+        # Safety check: if the measured wind is far from FMI's forecast for
+        # the town (more than 3 m/s and more than half of it), the stations
+        # reporting are not representative (e.g. only a lake island station
+        # reported), so the forecast value is shown instead.
+        $observed = [double]$measured['ws_10min'].Value
+        $expected = $current.wind_speed_10m
+        if ($null -ne $expected -and
+            [Math]::Abs($observed - [double]$expected) -gt [Math]::Max(3.0, 0.5 * [double]$expected)) {
+            Write-Log ([string]::Format($script:invariant,
+                'Station wind {0:0.0} m/s far from forecast {1:0.0} m/s; showing the forecast.', $observed, [double]$expected))
+        }
+        else {
+            $current.wind_speed_10m = $observed
+        }
+    }
 
     if ($current.feels_from_fmi) {
         # FMI's own "feels like", moved by the measured temperature difference.
@@ -3545,10 +3584,12 @@ function Merge-FmiObservations($current, [hashtable]$measured) {
             ([double]$current.wind_speed_10m) $h
     }
 
-    $nearest = 99.0
-    foreach ($found in $measured.Values) { $nearest = [Math]::Min($nearest, [double]$found.Km) }
-    $script:obsInfo = [string]::Format($script:invariant,
-        'Temperature, humidity and wind measured at an FMI station {0:0} km away.', [Math]::Max(1, $nearest))
+    $stations = 0
+    foreach ($found in $measured.Values) { $stations = [Math]::Max($stations, [int]$found.Stations) }
+    $script:obsInfo = 'Temperature, humidity and wind measured at FMI weather stations within 25 km.'
+    if ($stations -eq 1) {
+        $script:obsInfo = 'Temperature, humidity and wind measured at an FMI weather station within 25 km.'
+    }
 }
 
 function Get-WeatherCredit {
