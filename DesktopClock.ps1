@@ -1108,6 +1108,7 @@ $script:config = @{
     StartMenu       = $true
     LastUpdateCheck = $null
     UpdatedFrom     = $null    # set just before an automatic update restarts the widget
+    UpdatedTag      = $null    # release tag of that update, for the "What's new" link
     NotifiedVersion = $null    # update already announced (when it could not install)
     AnimateIcons    = $true
     Positions   = $null   # per layout: @{ Wide = @{...}; Narrow = @{...} }
@@ -4788,6 +4789,7 @@ function Complete-UpdateDownload {
 
         Write-Log "Updated from v$($script:AppVersion) to v$($script:updateInfo.Version); previous version kept as $backup"
         $script:config.UpdatedFrom = [string]$script:AppVersion   # the new copy shows "Updated"
+        $script:config.UpdatedTag = [string]$script:updateInfo.Tag
         Restart-Widget
     }
     catch {
@@ -4813,13 +4815,19 @@ function Restart-Widget {
 function Show-UpdatedNotice {
     $from = [string]$script:config.UpdatedFrom
     if (-not $from) { return }
+    $tag = [string]$script:config.UpdatedTag
     $script:config.UpdatedFrom = $null
+    $script:config.UpdatedTag = $null
     Save-Settings
     if ($from -eq [string]$script:AppVersion) { return }
+    # Release tags are not all spelled the same way (v1.0.0, V1.0.0), so the
+    # link uses the tag the update actually came from; otherwise the list.
+    $link = "https://github.com/$($script:UpdateRepo)/releases"
+    if ($tag) { $link = "https://github.com/$($script:UpdateRepo)/releases/tag/$([Uri]::EscapeDataString($tag))" }
     [void](Show-AppDialog -Toast -Seconds 15 -Title "Updated to version $($script:AppVersion)" `
         -Message "$($script:AppName) was updated automatically. Your settings are unchanged." `
         -Buttons @("What's new", 'Dismiss') -Primary "What's new" `
-        -Link "https://github.com/$($script:UpdateRepo)/releases/tag/v$($script:AppVersion)")
+        -Link $link)
 }
 
 $script:fadeDuration = New-Object Windows.Duration -ArgumentList ([TimeSpan]::FromMilliseconds(120))
@@ -5576,7 +5584,7 @@ finally {
         try { Remove-Item -LiteralPath $script:settingsFolder -Recurse -Force -ErrorAction Stop }
         catch {
             [void](Show-AppDialog -Kind Warning -Title 'Uninstall not fully completed' `
-                -Message 'The widget was closed, but some $script:AppVersion = [version]'1.1.0'$script:AppVersion = [version]'1.1.0'of its files could not be removed.' `
+                -Message 'The widget was closed, but some of its files could not be removed.' `
                 -Note "$($script:settingsFolder)`n$($_.Exception.Message)")
         }
     }
