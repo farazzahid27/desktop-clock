@@ -15,11 +15,15 @@ There is nothing to install system-wide and no administrator rights are needed.
   data from the Finnish Meteorological Institute (FMI); all other cities use
   Open-Meteo.
 - **Wind and humidity:** current wind speed (m/s) and relative humidity.
+- **Daily forecast details:** today's high and low temperatures, sunrise and
+  sunset times.
 - **Animated weather icons:** sun, moon, clouds, rain, snow, thunderstorms and
   fog move gently. Rain and snow follow the real precipitation amount, and the
   wind and humidity symbols follow the real values. Animations can be turned
   off.
 - **Layouts:** wide or stacked, or the clock or weather on its own.
+- **Resizable:** drag any corner to scale the widget and all its
+  contents proportionally; the chosen size is remembered.
 - **Automatic contrast:** switches between light and dark text based on the
   wallpaper behind the widget. Light and dark can also be set by hand.
 - **Remembers its place:** position per layout and per monitor, and it returns
@@ -47,8 +51,11 @@ menu. To start it automatically, right-click the widget and choose
 Right-click the widget and choose **Choose city**, search for your city and
 select it. The weather appears within a few seconds.
 
-Drag the widget to move it. Drag the small corner at the bottom right to
-switch between the wide and stacked layouts.
+Drag the widget to move it. Drag any corner to make the widget larger or
+smaller without changing its proportions; the opposite corner stays in place.
+The size is remembered when you close and reopen the widget. The widget keeps a
+small gap from the edge of the usable screen area. Choose **Layout** in the
+settings menu to switch between the wide and stacked layouts.
 
 ## Settings
 

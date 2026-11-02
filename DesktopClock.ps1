@@ -18,8 +18,8 @@
 #     restarts and works on Windows 11 24H2.
 #   - Auto contrast reads the actual wallpaper image under the widget
 #     (IDesktopWallpaper), not screen pixels around it.
-#   - Content-measured layout: minimum sizes follow the real text, resizing
-#     stops at the monitor edge, wide/narrow switch is width-based only.
+#   - Content-measured layout with proportional scaling; resizing stops at the
+#     monitor edge, and the wide/narrow choice remains width-based.
 #   - Gear/close live in the weather header in both layouts.
 #   - Tray icon as a reliable route to settings and closing.
 #   - Honest weather status, retry back-off, proxy credentials, logging,
@@ -59,7 +59,7 @@ Add-Type -AssemblyName System.Windows.Forms
 # ---- Version and update source --------------------------------------------
 # Raise AppVersion before publishing a new GitHub release with a higher tag
 # (e.g. AppVersion 1.1.0 -> release tag v1.1.0).
-$script:AppVersion = [version]'1.0.4'
+$script:AppVersion = [version]'1.1.0'
 $script:UpdateRepo = 'farazzahid27/desktop-clock'
 # Name shown to users. File, folder and repository names stay "DesktopClock"
 # so updates and settings keep working.
@@ -476,6 +476,9 @@ public static class DesktopClockNative
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
 
+    [DllImport("user32.dll", EntryPoint = "GetDpiForWindow")]
+    static extern uint GetDpiForWindow(IntPtr hwnd);
+
     [DllImport("user32.dll")]
     public static extern bool GetCursorPos(out POINT point);
 
@@ -634,17 +637,28 @@ public static class DesktopClockNative
         return preferred;
     }
 
-    static void Clamp(ref int x, ref int y, int width, int height) {
+    static void Clamp(ref int x, ref int y, int width, int height, int inset) {
         RECT work = CurrentWork;
         if (work.Right <= work.Left || work.Bottom <= work.Top) return;
-        x = Math.Max(work.Left, Math.Min(x, work.Right - width));
-        y = Math.Max(work.Top, Math.Min(y, work.Bottom - height));
+        int insetX = Math.Min(inset, Math.Max(0, (work.Right - work.Left - 1) / 2));
+        int insetY = Math.Min(inset, Math.Max(0, (work.Bottom - work.Top - 1) / 2));
+        x = Math.Max(work.Left + insetX, Math.Min(x, work.Right - insetX - width));
+        y = Math.Max(work.Top + insetY, Math.Min(y, work.Bottom - insetY - height));
+    }
+
+    static int GetEdgeInset(IntPtr hwnd) {
+        uint dpi = 96;
+        try { dpi = GetDpiForWindow(hwnd); }
+        catch (EntryPointNotFoundException) {}
+        if (dpi == 0) dpi = 96;
+        return (int)Math.Round(8.0 * dpi / 96.0);
     }
 
     public static void MoveTo(IntPtr hwnd, int x, int y) {
         RECT rect;
         if (!GetWindowRect(hwnd, out rect)) return;
-        Clamp(ref x, ref y, rect.Right - rect.Left, rect.Bottom - rect.Top);
+        Clamp(ref x, ref y, rect.Right - rect.Left, rect.Bottom - rect.Top,
+            GetEdgeInset(hwnd));
         if (x == rect.Left && y == rect.Top) return;
         SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -653,7 +667,7 @@ public static class DesktopClockNative
     // Position and size in one call, clamped using the given (intended) size
     // rather than whatever size the window currently reports.
     public static void PlaceAt(IntPtr hwnd, int x, int y, int width, int height) {
-        Clamp(ref x, ref y, width, height);
+        Clamp(ref x, ref y, width, height, GetEdgeInset(hwnd));
         SetWindowPos(hwnd, IntPtr.Zero, x, y, width, height,
             SWP_NOZORDER | SWP_NOACTIVATE);
     }
@@ -710,7 +724,7 @@ public static class DesktopClockNative
                         }
                     }
                     int x = pos.x, y = pos.y;
-                    Clamp(ref x, ref y, width, height);
+                    Clamp(ref x, ref y, width, height, GetEdgeInset(hwnd));
                     if (x != pos.x || y != pos.y) {
                         pos.x = x;
                         pos.y = y;
@@ -1023,6 +1037,8 @@ $script:ch = @{
     Ellipsis = [string][char]0x2026
     Minus    = [string][char]0x2212
     Nbsp     = [string][char]0x00A0
+    Up       = [string][char]0x2191
+    Down     = [string][char]0x2193
 }
 
 $script:scriptPath = $PSCommandPath
@@ -1080,6 +1096,7 @@ $script:config = @{
     MonitorRect = $null
     Width       = 520
     Height      = 0
+    Scale       = 1.0
     Theme       = 'Auto'
     Opacity     = 0.15
     UpdateChecks    = $true
@@ -1155,6 +1172,9 @@ catch {
     $script:config.Width = 520
     $script:config.Height = 0
 }
+
+try { $script:config.Scale = [Math]::Max(0.5, [Math]::Min(3.0, [double]$script:config.Scale)) }
+catch { $script:config.Scale = 1.0 }
 
 if ($null -ne $script:config.City) {
     try {
@@ -1236,6 +1256,14 @@ $script:displayCheckAt = $null
 
 $script:weatherTask = $null
 $script:weatherCity = $null
+$script:dailyTask = $null
+$script:dailyTaskCity = $null
+$script:dailyRetryCity = $null
+$script:dailyNextTry = [DateTime]::MinValue
+$script:dailyHigh = $null
+$script:dailyLow = $null
+$script:sunrise = $null
+$script:sunset = $null
 $script:nextWeather = [DateTime]::MinValue
 $script:lastUpdated = $null
 $script:updateFailed = $false
@@ -1252,7 +1280,6 @@ $script:statsColor = [Windows.Media.Colors]::White
 
 $script:city = $null
 $script:startRect = $null
-$script:resizeStartMode = ''
 
 $script:updateTask = $null
 $script:updateManual = $false
@@ -1346,8 +1373,36 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                 </Setter.Value>
             </Setter>
         </Style>
+        <Style x:Key="ResizeGripStyle" TargetType="Thumb">
+            <Setter Property="Width" Value="18"/>
+            <Setter Property="Height" Value="18"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Border Background="#01000000">
+                            <Path x:Name="GripMarks"
+                                  Data="M 5,15 L 15,5 M 10,15 L 15,10"
+                                  Stroke="{TemplateBinding Foreground}"
+                                  StrokeThickness="1.5"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                  Opacity="0"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="GripMarks" Property="Opacity" Value="1"/>
+                            </Trigger>
+                            <Trigger Property="IsDragging" Value="True">
+                                <Setter TargetName="GripMarks" Property="Opacity" Value="1"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
+    <Viewbox x:Name="ScaleView" Stretch="Uniform" StretchDirection="Both">
+    <Grid x:Name="WidgetRoot">
     <Border x:Name="Card" CornerRadius="10">
         <Grid>
             <Grid x:Name="ContentGrid" Background="#01000000" Margin="10,8,10,8">
@@ -1358,11 +1413,11 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                                 HorizontalAlignment="Left">
                         <!-- Header: "Monday, 05 Oct 2026 | Week 41" -->
                         <TextBlock x:Name="DateText"
-                                   FontSize="14" Opacity="0.72"
+                                    FontSize="16" Opacity="0.72"
                                    TextTrimming="CharacterEllipsis"/>
                         <!-- Own line for the week when seconds are hidden. -->
                         <TextBlock x:Name="WeekText"
-                                   FontSize="14" Opacity="0.72"
+                                    FontSize="16" Opacity="0.72"
                                    Visibility="Collapsed"/>
                         <!-- Hours, minutes and seconds share one size and weight.
                              Tabular digits keep the width steady every second. -->
@@ -1384,12 +1439,13 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
 
                         <!-- City, uppercase: "TAMPERE, FI" -->
                         <TextBlock x:Name="LocationText" Text="CHOOSE YOUR CITY"
-                                   FontSize="14"
+                                    FontSize="16"
                                    Opacity="0.7"
                                    TextTrimming="CharacterEllipsis"/>
 
                         <!-- Left: temperature over "Feels like".
-                             Middle: wind speed over humidity.
+                             Middle: wind speed over humidity (centred in the
+                             leftover room when stacked, see Set-WeatherSizing).
                              Right: icon over condition, centred, right-aligned. -->
                         <Grid x:Name="TemperatureRow" Margin="0,2,0,0">
                             <Grid.ColumnDefinitions>
@@ -1408,8 +1464,45 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                                         VerticalAlignment="Center">
                                 <TextBlock x:Name="TempValue" Text="--" FontSize="54"
                                            Typography.NumeralAlignment="Tabular"/>
-                                <TextBlock x:Name="TempUnit" Text="" FontSize="20"
-                                           VerticalAlignment="Top" Margin="3,0,0,0"/>
+                                <StackPanel VerticalAlignment="Top" Margin="3,0,0,0">
+                                    <TextBlock x:Name="TempUnit" Text="" FontSize="20"
+                                               VerticalAlignment="Top"/>
+                                    <!-- Today's high and low, each with a small thermometer:
+                                         warm mercury and an up chevron for the high, cool
+                                         mercury and a down chevron for the low. -->
+                                    <StackPanel x:Name="TempHighRow" Orientation="Horizontal" Margin="0"
+                                                HorizontalAlignment="Left" ToolTip="Today's high temperature">
+                                        <Viewbox x:Name="TempHighIcon" Width="16" Height="16" VerticalAlignment="Center">
+                                            <Canvas Width="16" Height="16">
+                                                <Ellipse Canvas.Left="5.8" Canvas.Top="9.8" Width="4.4" Height="4.4" Fill="#E8603C"/>
+                                                <Rectangle Canvas.Left="7.1" Canvas.Top="4" Width="1.8" Height="7" Fill="#E8603C"/>
+                                                <Path x:Name="TempHighPath" StrokeThickness="1.3" StrokeLineJoin="Round"
+                                                      Data="M 6,2.5 A 2,2 0 0 1 10,2.5 L 10,9.5 A 3.2,3.2 0 1 1 6,9.5 Z"/>
+                                                <Path Stroke="#E8603C" StrokeThickness="1.4"
+                                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                      Data="M 12,6.5 L 13.5,5 L 15,6.5"/>
+                                            </Canvas>
+                                        </Viewbox>
+                                        <TextBlock x:Name="TempHighText" Text="--" FontSize="20"
+                                                   Margin="3,0,0,0" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                    <StackPanel x:Name="TempLowRow" Orientation="Horizontal" Margin="0"
+                                                HorizontalAlignment="Left" ToolTip="Today's low temperature">
+                                        <Viewbox x:Name="TempLowIcon" Width="16" Height="16" VerticalAlignment="Center">
+                                            <Canvas Width="16" Height="16">
+                                                <Ellipse Canvas.Left="5.8" Canvas.Top="9.8" Width="4.4" Height="4.4" Fill="#3A8EE6"/>
+                                                <Rectangle Canvas.Left="7.1" Canvas.Top="8" Width="1.8" Height="3" Fill="#3A8EE6"/>
+                                                <Path x:Name="TempLowPath" StrokeThickness="1.3" StrokeLineJoin="Round"
+                                                      Data="M 6,2.5 A 2,2 0 0 1 10,2.5 L 10,9.5 A 3.2,3.2 0 1 1 6,9.5 Z"/>
+                                                <Path Stroke="#3A8EE6" StrokeThickness="1.4"
+                                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                      Data="M 12,10 L 13.5,11.5 L 15,10"/>
+                                            </Canvas>
+                                        </Viewbox>
+                                        <TextBlock x:Name="TempLowText" Text="--" FontSize="20"
+                                                   Margin="3,0,0,0" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </StackPanel>
                             </StackPanel>
 
                             <!-- Wind speed and humidity, each with a small drawn
@@ -1424,7 +1517,7 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                                                   Data="M 1.5,5.5 L 9.5,5.5 C 11.5,5.5 12.3,3 10.7,2 C 9.6,1.4 8.4,2 8.2,3 M 1.5,9 L 12.5,9 C 14.5,9 15.2,11.5 13.6,12.6 C 12.5,13.2 11.3,12.6 11.1,11.6 M 1.5,12.5 L 7,12.5"/>
                                         </Canvas>
                                     </Viewbox>
-                                    <TextBlock x:Name="WindText" Text="--" FontSize="12"
+                                    <TextBlock x:Name="WindText" Text="--" FontSize="14"
                                                Margin="4,0,0,0" VerticalAlignment="Center"/>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="0,3,0,0"
@@ -1436,7 +1529,52 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                                                   Data="M 8,1.5 C 8,1.5 3,7.2 3,10.3 C 3,13.1 5.2,15 8,15 C 10.8,15 13,13.1 13,10.3 C 13,7.2 8,1.5 8,1.5 Z"/>
                                         </Canvas>
                                     </Viewbox>
-                                    <TextBlock x:Name="HumidityText" Text="--" FontSize="12"
+                                    <TextBlock x:Name="HumidityText" Text="--" FontSize="14"
+                                               Margin="4,0,0,0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,3,0,0"
+                                            ToolTip="Sunrise, local time">
+                                    <!-- Horizon with the sun rising out of it; chevron shows the direction. -->
+                                    <Viewbox Width="14" Height="14" VerticalAlignment="Center">
+                                        <Canvas Width="16" Height="16">
+                                            <Canvas x:Name="SunriseArt" Width="16" Height="16" Clip="M0,0 H16 V10.25 H0 Z" Tag="Rise">
+                                                <Canvas.RenderTransform><TranslateTransform/></Canvas.RenderTransform>
+                                                <Path Tag="Rays:Rise" Stroke="#F5A524" StrokeThickness="1.3"
+                                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                                      Data="M 8,2.6 L 8,1 M 3.4,7.25 L 1.8,7.25 M 12.6,7.25 L 14.2,7.25 M 5.03,4.28 L 4.04,3.29 M 10.97,4.28 L 11.96,3.29"/>
+                                                <Ellipse Canvas.Left="5" Canvas.Top="4.25" Width="6" Height="6" Fill="#FFD23F"/>
+                                            </Canvas>
+                                            <Path x:Name="SunriseHorizon" StrokeThickness="1.5"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                                  Data="M 1.5,10.25 L 14.5,10.25"/>
+                                            <Path x:Name="SunriseChevron" StrokeThickness="1.4"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="M 5.5,14.5 L 8,12 L 10.5,14.5"/>
+                                        </Canvas>
+                                    </Viewbox>
+                                    <TextBlock x:Name="SunriseText" Text="--:--" FontSize="14"
+                                               Margin="4,0,0,0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,3,0,0"
+                                            ToolTip="Sunset, local time">
+                                    <Viewbox Width="14" Height="14" VerticalAlignment="Center">
+                                        <Canvas Width="16" Height="16">
+                                            <Canvas x:Name="SunsetArt" Width="16" Height="16" Clip="M0,0 H16 V10.25 H0 Z" Tag="Set">
+                                                <Canvas.RenderTransform><TranslateTransform/></Canvas.RenderTransform>
+                                                <Path Tag="Rays:Set" Stroke="#E0661E" StrokeThickness="1.3"
+                                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                                      Data="M 8,2.6 L 8,1 M 3.4,7.25 L 1.8,7.25 M 12.6,7.25 L 14.2,7.25 M 5.03,4.28 L 4.04,3.29 M 10.97,4.28 L 11.96,3.29"/>
+                                                <Ellipse Canvas.Left="5" Canvas.Top="4.25" Width="6" Height="6" Fill="#F08A3C"/>
+                                            </Canvas>
+                                            <Path x:Name="SunsetHorizon" StrokeThickness="1.5"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                                  Data="M 1.5,10.25 L 14.5,10.25"/>
+                                            <Path x:Name="SunsetChevron" StrokeThickness="1.4"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="M 5.5,12 L 8,14.5 L 10.5,12"/>
+                                        </Canvas>
+                                    </Viewbox>
+                                    <TextBlock x:Name="SunsetText" Text="--:--" FontSize="14"
                                                Margin="4,0,0,0" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </StackPanel>
@@ -1457,30 +1595,6 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                                        HorizontalAlignment="Center" VerticalAlignment="Top"/>
                         </Grid>
 
-                        <!-- Footer: "Updated 1 minute ago" + refresh. Hidden until the
-                             pointer is over this line, but always shown when the
-                             weather is stale, a refresh failed or no city is set.
-                             Its space is kept so the layout never jumps. -->
-                        <Grid x:Name="FooterRow" Margin="0,8,0,0" Background="#01000000"
-                              Opacity="0">
-                            <!-- Inner grid hugs the text so the button sits right
-                                 after it; long text trims with an ellipsis. -->
-                            <Grid HorizontalAlignment="Left">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock x:Name="UpdatedText"
-                                           FontSize="12" Opacity="0.62"
-                                           VerticalAlignment="Center"
-                                           TextTrimming="CharacterEllipsis"/>
-                                <Button x:Name="RefreshButton" Grid.Column="1" Tag="NoDrag"
-                                        Style="{StaticResource IconButton}"
-                                        Width="20" Height="20" FontSize="12"
-                                        Margin="3,0,0,0" Content="&#x21BB;"
-                                        ToolTip="Refresh weather now"/>
-                            </Grid>
-                        </Grid>
                     </StackPanel>
                 </Grid>
             </Grid>
@@ -1490,7 +1604,7 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                  the pointer is inside it. Text underneath reserves room for it. -->
             <Border x:Name="ControlHotspot" Tag="NoDrag" Background="#01000000"
                     HorizontalAlignment="Right" VerticalAlignment="Top"
-                    CornerRadius="6" Margin="0,3,3,0">
+                    CornerRadius="6" Margin="0,3,22,0">
                 <!-- Backing in the card's colour: while shown, the buttons cover
                      the text under them instead of being drawn on top of it. -->
                 <Border x:Name="CornerButtons" Opacity="0" CornerRadius="6" Padding="4,2,2,2">
@@ -1508,33 +1622,40 @@ $script:http.DefaultRequestHeaders.UserAgent.ParseAdd("DesktopClock/$($script:Ap
                 </Border>
             </Border>
 
-            <Thumb x:Name="ResizeGrip" Tag="NoDrag"
-                   Width="18" Height="18" Margin="0,0,1,1"
-                   HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                   Cursor="SizeNWSE" ToolTip="Drag to resize">
-                <Thumb.Template>
-                    <ControlTemplate TargetType="Thumb">
-                        <Border Background="#01000000">
-                            <Path x:Name="GripMarks"
-                                  Data="M 5,15 L 15,5 M 10,15 L 15,10"
-                                  Stroke="{TemplateBinding Foreground}"
-                                  StrokeThickness="1.2"
-                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                                  Opacity="0"/>
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="GripMarks" Property="Opacity" Value="0.6"/>
-                            </Trigger>
-                            <Trigger Property="IsDragging" Value="True">
-                                <Setter TargetName="GripMarks" Property="Opacity" Value="0.85"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Thumb.Template>
-            </Thumb>
         </Grid>
     </Border>
+    <Grid x:Name="FooterRow" VerticalAlignment="Bottom" Background="#01000000"
+          Opacity="1">
+        <Grid x:Name="FooterHotspot" HorizontalAlignment="Left" MinWidth="120" Background="#01000000">
+        <Grid x:Name="FooterContent">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="UpdatedText" FontSize="12" Opacity="0.62"
+                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            <Button x:Name="RefreshButton" Grid.Column="1" Tag="NoDrag"
+                    Style="{StaticResource IconButton}"
+                    Width="26" Height="26" FontSize="15"
+                    Margin="3,0,0,0" Content="&#x21BB;"
+                    ToolTip="Refresh weather now"/>
+        </Grid>
+        </Grid>
+    </Grid>
+    <Thumb x:Name="ResizeGripTopLeft" Tag="TopLeft" Style="{StaticResource ResizeGripStyle}"
+           HorizontalAlignment="Left" VerticalAlignment="Top"
+           Cursor="SizeNWSE" ToolTip="Drag to resize"/>
+    <Thumb x:Name="ResizeGripTopRight" Tag="TopRight" Style="{StaticResource ResizeGripStyle}"
+           HorizontalAlignment="Right" VerticalAlignment="Top"
+           Cursor="SizeNESW" ToolTip="Drag to resize"/>
+    <Thumb x:Name="ResizeGripBottomLeft" Tag="BottomLeft" Style="{StaticResource ResizeGripStyle}"
+           HorizontalAlignment="Left" VerticalAlignment="Bottom"
+           Cursor="SizeNESW" ToolTip="Drag to resize"/>
+    <Thumb x:Name="ResizeGrip" Tag="BottomRight" Style="{StaticResource ResizeGripStyle}"
+           HorizontalAlignment="Right" VerticalAlignment="Bottom"
+           Cursor="SizeNWSE" ToolTip="Drag to resize"/>
+    </Grid>
+    </Viewbox>
 </Window>
 '@
 
@@ -1546,11 +1667,19 @@ $ui = @{}
 @(
     'Card','ContentGrid','ClockPanel','ClockStack','WeatherPanel','WeatherStack',
     'Divider','DateText','TimeText','LocationText','TemperatureText','FeelsText',
-    'TempValue','TempUnit','FooterRow','WeekText','TimeRow','TimeSuffix',
+    'TempValue','TempUnit','TempHighText','TempLowText','SunriseText','SunsetText',
+    'SunriseArt','SunsetArt','SunriseHorizon','SunriseChevron','SunsetHorizon','SunsetChevron',
+    'TempHighIcon','TempLowIcon','TempHighPath','TempLowPath',
+    'FooterRow','FooterHotspot','FooterContent','WeekText','TimeRow','TimeSuffix',
     'WeatherArt','ConditionText','UpdatedText','RefreshButton','ControlHotspot',
-    'CornerButtons','SettingsButton','CloseButton','ResizeGrip','TemperatureRow',
+    'CornerButtons','SettingsButton','CloseButton','ResizeGrip','ResizeGripTopLeft',
+    'ResizeGripTopRight','ResizeGripBottomLeft','TemperatureRow',
     'WeatherStats','WindText','HumidityText','WindPath','HumidityPath'
 ) | ForEach-Object { $ui[$_] = $window.FindName($_) }
+$script:resizeGrips = @(
+    $ui.ResizeGripTopLeft, $ui.ResizeGripTopRight,
+    $ui.ResizeGripBottomLeft, $ui.ResizeGrip
+)
 
 $script:brushConverter = New-Object Windows.Media.BrushConverter
 
@@ -1574,6 +1703,7 @@ $script:timeWidth = 180.0
 # Card padding around the content (must match ContentGrid's Margin).
 $script:padX = 10.0   # left and right
 $script:padY = 8.0    # top and bottom
+$script:footerOutsideHeight = 28.0
 $script:stackedWidth = 226.0
 $script:stackedContentWidth = 226.0   # stackedWidth, or wider if the weather needs it
 
@@ -1627,6 +1757,54 @@ function Set-CapAlignment($big, $small, [double]$left, [double]$shift) {
     }
 }
 
+# Header (date / week) and city text sizes. The stacked layout uses a
+# slightly larger size and pulls the time up closer to the date.
+$script:headerSize = 16.0
+$script:stackedHeaderSize = 18.0
+$script:citySize = 16.0
+$script:stackedCitySize = 18.0
+$script:stackedTimeGap = -7.0       # top margin of the time row when stacked
+$script:timeFontWide = 54.0
+$script:timeFontStacked = 54.0
+$script:stackedDateWidth = 130.0
+
+# Applies the clock / city text sizes of a layout. Called from
+# Set-WeatherSizing, so temporary layout switches used for measuring
+# always see the matching sizes.
+function Set-ClockSizing([string]$mode) {
+    $stacked = $mode -eq 'Narrow'
+    $header = $script:headerSize
+    $city = $script:citySize
+    $time = $script:timeFontWide
+    $gap = 0.0
+    if ($stacked) {
+        $header = $script:stackedHeaderSize
+        $city = $script:stackedCitySize
+        $time = $script:timeFontStacked
+        $gap = $script:stackedTimeGap
+    }
+    $ui.DateText.FontSize = $header
+    $ui.WeekText.FontSize = $header
+    $ui.LocationText.FontSize = $city
+    $ui.TimeText.FontSize = $time
+    if ($ui.TimeSuffix.Text) { Set-CapAlignment $ui.TimeText $ui.TimeSuffix 4 -3 }
+    $ui.TimeRow.Margin = New-Object Windows.Thickness -ArgumentList 0, $gap, 0, 0
+}
+
+# Time font size that makes the time row (digits + AM/PM) about $target wide.
+function Get-TimeFontSize([double]$target, [double]$base, [double]$suffixWidth) {
+    if ($base -le 0) { return 54.0 }
+    # +2 px so rounding can never trim the header.
+    return [Math]::Min(84.0, 54.0 * ($target + 2 - $suffixWidth) / $base)
+}
+
+function Measure-TimeRow([double]$fontSize) {
+    $ui.TimeText.FontSize = $fontSize
+    if ($ui.TimeSuffix.Text) { Set-CapAlignment $ui.TimeText $ui.TimeSuffix 4 -3 }
+    $ui.TimeRow.Measure((New-Size ([double]::PositiveInfinity) ([double]::PositiveInfinity)))
+    return [double]$ui.TimeRow.DesiredSize.Width
+}
+
 function Update-Metrics {
     $infinite = [double]::PositiveInfinity
 
@@ -1639,17 +1817,27 @@ function Update-Metrics {
     # Widest header this week (day names differ in length), measured with
     # the real font. Week 52 stands in for any two-digit week number, so no
     # day of the year can be cut off.
+    # Measured at the normal and at the (larger) stacked header size.
     $saved = $ui.DateText.Text
+    $savedSize = $ui.DateText.FontSize
     $longest = 0.0
+    $longestStacked = 0.0
     $today = (Get-Date).Date
     for ($i = 0; $i -lt 7; $i++) {
         $ui.DateText.Text = Get-HeaderText ($today.AddDays($i)) 52
+        $ui.DateText.FontSize = $script:headerSize
         $ui.DateText.Measure((New-Size $infinite $infinite))
         $longest = [Math]::Max($longest,
             [double]$ui.DateText.DesiredSize.Width - $ui.DateText.Margin.Right)
+        $ui.DateText.FontSize = $script:stackedHeaderSize
+        $ui.DateText.Measure((New-Size $infinite $infinite))
+        $longestStacked = [Math]::Max($longestStacked,
+            [double]$ui.DateText.DesiredSize.Width - $ui.DateText.Margin.Right)
     }
     $ui.DateText.Text = $saved
+    $ui.DateText.FontSize = $savedSize
     $script:dateWidth = [Math]::Ceiling($longest)
+    $script:stackedDateWidth = [Math]::Ceiling($longestStacked)
 
     # Time in the current format (the hour may have one or two digits).
     $parts = Get-TimeParts (Get-Date)
@@ -1672,14 +1860,14 @@ function Update-Metrics {
     $headroom = $script:controlReserve
     if (Test-SplitWeek) { $headroom = 0.0 }
     $target = [Math]::Max($base + $suffixWidth, $script:dateWidth + $headroom)
-    if ($base -gt 0) {
-        # +2 px so rounding can never trim the header.
-        $ui.TimeText.FontSize = [Math]::Min(84.0, 54.0 * ($target + 2 - $suffixWidth) / $base)
-    }
-    if ($parts[1]) { Set-CapAlignment $ui.TimeText $ui.TimeSuffix 4 -3 }
+    $script:timeFontWide = Get-TimeFontSize $target $base $suffixWidth
+    # Stacked: the larger date normally fits in the headroom, so the time
+    # keeps its size; it only grows if the date would run past it.
+    $stackedTarget = [Math]::Max($target, [double]$script:stackedDateWidth)
+    $script:timeFontStacked = Get-TimeFontSize $stackedTarget $base $suffixWidth
 
-    $ui.TimeRow.Measure((New-Size $infinite $infinite))
-    $timeWidth = [double]$ui.TimeRow.DesiredSize.Width
+    $stackedTimeWidth = Measure-TimeRow $script:timeFontStacked
+    $timeWidth = Measure-TimeRow $script:timeFontWide
     $script:timeWidth = [Math]::Ceiling($timeWidth)
 
     $script:clockWidth = [Math]::Ceiling([Math]::Max($timeWidth, $script:dateWidth))
@@ -1688,9 +1876,11 @@ function Update-Metrics {
 
     # Stacked (and weather-only) content width: the time row, unless the
     # header still needs more - the header is never cut off.
-    $script:stackedWidth = [Math]::Ceiling([Math]::Max($script:timeWidth,
-        $script:dateWidth + $headroom))
+    $script:stackedWidth = [Math]::Ceiling([Math]::Max($stackedTimeWidth,
+        [Math]::Max($script:dateWidth + $headroom, [double]$script:stackedDateWidth)))
     $script:narrowMinWidth = 2 * $script:padX + $script:stackedWidth
+
+    Set-ClockSizing $script:layoutMode
 }
 
 # Places the top of the degree-C unit level with the top of the digits. In WPF the
@@ -1708,13 +1898,18 @@ function Update-UnitAlignment {
 # temperature column also holds "Feels like" in this layout.
 function Update-ArtSize {
     $infinite = [double]::PositiveInfinity
+    $width = [double]$script:stackedContentWidth
     $ui.TemperatureText.Measure((New-Size $infinite $infinite))
     $temperature = [double]$ui.TemperatureText.DesiredSize.Width
     $ui.FeelsText.Measure((New-Size $infinite $infinite))
-    $left = [Math]::Max($temperature, [double]$ui.FeelsText.DesiredSize.Width)
+    $feels = [double]$ui.FeelsText.DesiredSize.Width
     $ui.WeatherStats.Measure((New-Size $infinite $infinite))
-    $stats = [double]$ui.WeatherStats.DesiredSize.Width
-    $available = $script:stackedContentWidth - $left - $stats - 12 + 5
+    $stats = [double]$ui.WeatherStats.DesiredSize.Width   # includes its left gap
+    # "Feels like" is on the line below and may run under wind/humidity, so
+    # only the temperature pushes that column right (unless "Feels like" is
+    # longer than the temperature and the column together).
+    $left = [Math]::Max($temperature, $feels - $stats)
+    $available = $width - $left - $stats - 6
     $size = [Math]::Max(40.0, [Math]::Min(112.0, [Math]::Floor($available)))
     $height = [Math]::Round($size * 0.86)
     if ($ui.WeatherArt.Width -ne $size) {
@@ -1722,13 +1917,20 @@ function Update-ArtSize {
         $ui.WeatherArt.Height = $height
     }
 
+    # The condition line may never widen the icon columns (that would push
+    # the icon past the edge, where it is cut off) nor reach "Feels like".
+    $maxText = [Math]::Min(130.0, $width - $left)
+    if ($feels -gt 0) { $maxText = [Math]::Min($maxText, $width + 5 - $feels - 6) }
+    $maxText = [Math]::Max(40.0, [Math]::Floor($maxText))
+    if ($ui.ConditionText.MaxWidth -ne $maxText) { $ui.ConditionText.MaxWidth = $maxText }
+
     # Condition text centred under the icon. If it is wider than the icon it
     # may extend left (under wind/humidity) but never past the icon's right
-    # edge. The icon sits 12 px into its column and 5 px beyond its end.
+    # edge. The icon has a 6 px leading gap and stays inside its column.
     $ui.ConditionText.Measure((New-Size $infinite $infinite))
     $text = [double]$ui.ConditionText.DesiredSize.Width -
         $ui.ConditionText.Margin.Left - $ui.ConditionText.Margin.Right
-    $right = [Math]::Max(-5.0, $size / 2 - 5 - $text / 2)
+    $right = [Math]::Max(0.0, $size / 2 - $text / 2)
     $margin = New-Object Windows.Thickness -ArgumentList 0, 0, $right, 0
     if ($ui.ConditionText.Margin -ne $margin) { $ui.ConditionText.Margin = $margin }
 }
@@ -1745,8 +1947,13 @@ function Update-ArtSize {
 #   Stacked / weather only: temperature at the time's size, larger unit,
 #            icon filling the room beside the temperature.
 function Set-WeatherSizing([string]$mode) {
+    Set-ClockSizing $mode
     if ($mode -eq 'Wide') {
         $ui.TempUnit.FontSize = 14
+        $ui.TempHighText.FontSize = $ui.TempUnit.FontSize
+        $ui.TempLowText.FontSize = $ui.TempUnit.FontSize
+        $ui.TempHighIcon.Width = 11; $ui.TempHighIcon.Height = 11
+        $ui.TempLowIcon.Width = 11; $ui.TempLowIcon.Height = 11
         $infinite = [double]::PositiveInfinity
         $ui.ClockStack.Measure((New-Size $infinite $infinite))
         $clockHeight = [double]$ui.ClockStack.DesiredSize.Height
@@ -1762,28 +1969,53 @@ function Set-WeatherSizing([string]$mode) {
     }
     else {
         $ui.TempUnit.FontSize = 20
+        $ui.TempHighText.FontSize = $ui.TempUnit.FontSize
+        $ui.TempLowText.FontSize = $ui.TempUnit.FontSize
+        $ui.TempHighIcon.Width = 16; $ui.TempHighIcon.Height = 16
+        $ui.TempLowIcon.Width = 16; $ui.TempLowIcon.Height = 16
         $ui.TempValue.FontSize = $ui.TimeText.FontSize
-        $indent = 10
+        $indent = if ($mode -eq 'Narrow') { 2 } else { 10 }
     }
     Update-NegativeStyle $mode
     Update-UnitAlignment
 
-    # Wind/humidity column. Stacked (fixed width): the condition text may use
-    # the room under wind/humidity and the icon, so the size never changes.
-    # Wide / weather only: "Feels like" may run under wind/humidity, so the
-    # widget only widens by what the new column really needs.
+    # Wind/humidity column. In every layout "Feels like" may run under
+    # wind/humidity, so it spans the temperature and the column.
+    # Stacked (fixed width): the middle column takes the leftover room and
+    # the wind/humidity column is centred in it, so the gaps on both sides of
+    # it are equal; the condition text may use the room under wind/humidity
+    # and the icon.
+    $auto = [Windows.GridLength]::Auto
+    $star = New-Object Windows.GridLength -ArgumentList 1, ([Windows.GridUnitType]::Star)
+    [Windows.Controls.Grid]::SetColumnSpan($ui.FeelsText, 2)
     if ($mode -eq 'Narrow') {
-        [Windows.Controls.Grid]::SetColumnSpan($ui.FeelsText, 1)
+        $ui.TemperatureRow.ColumnDefinitions[0].Width = $auto
+        $ui.TemperatureRow.ColumnDefinitions[1].Width = $star
+        $ui.TemperatureText.VerticalAlignment = 'Top'
+        $ui.WeatherStats.VerticalAlignment = 'Top'
+        $ui.WeatherStats.HorizontalAlignment = 'Center'
+        $tf = New-Object Windows.Media.Typeface -ArgumentList $ui.TempValue.FontFamily, $ui.TempValue.FontStyle, $ui.TempValue.FontWeight, $ui.TempValue.FontStretch
+        $space = $tf.FontFamily.Baseline - $tf.CapsHeight
+        $top = [Math]::Round($space * ($ui.TempValue.FontSize - $ui.WindText.FontSize))
+        $ui.WeatherStats.Margin = New-Object Windows.Thickness -ArgumentList 0, $top, 0, 0
+        $ui.WeatherArt.Margin = '6,0,0,0'
         [Windows.Controls.Grid]::SetColumn($ui.ConditionText, 1)
         [Windows.Controls.Grid]::SetColumnSpan($ui.ConditionText, 2)
-        $ui.ConditionText.HorizontalAlignment = 'Right'   # margin set in Update-ArtSize
+        $ui.ConditionText.HorizontalAlignment = 'Right'   # margin and width set in Update-ArtSize
     }
     else {
-        [Windows.Controls.Grid]::SetColumnSpan($ui.FeelsText, 2)
+        $ui.TemperatureRow.ColumnDefinitions[0].Width = $star
+        $ui.TemperatureRow.ColumnDefinitions[1].Width = $auto
+        $ui.TemperatureText.VerticalAlignment = 'Center'
+        $ui.WeatherStats.VerticalAlignment = 'Center'
+        $ui.WeatherStats.HorizontalAlignment = 'Left'
+        $ui.WeatherStats.Margin = '8,0,0,0'
+        $ui.WeatherArt.Margin = '12,0,-5,0'
         [Windows.Controls.Grid]::SetColumn($ui.ConditionText, 2)
         [Windows.Controls.Grid]::SetColumnSpan($ui.ConditionText, 1)
         $ui.ConditionText.HorizontalAlignment = 'Center'
         $ui.ConditionText.Margin = '12,0,-5,0'
+        $ui.ConditionText.MaxWidth = 130
     }
 
     # Temperature may be indented; "Feels like" always lines up with the city.
@@ -1883,25 +2115,40 @@ function Update-Layout([string]$mode) {
         }
         [Windows.Controls.Grid]::SetRow($ui.Divider, 1)
         [Windows.Controls.Grid]::SetRow($ui.WeatherPanel, 2)
-        $ui.ClockPanel.Margin = '0,0,0,8'
+        $ui.ClockPanel.Margin = '0,0,0,4'
         $ui.Divider.Margin = '0,0,0,0'
-        $ui.WeatherPanel.Margin = '0,8,0,0'
+        $ui.WeatherPanel.Margin = '0,4,0,0'
     }
     else {
         $ui.ClockPanel.Margin = '0'
         $ui.WeatherPanel.Margin = '0'
     }
 
-    # "Updated ..." line: its own line in stacked / weather-only; in wide it
-    # appears over the bottom line on hover so it never adds height.
-    if ($mode -eq 'Wide') { $ui.FooterRow.Margin = '0,-20,0,0' }
-    else { $ui.FooterRow.Margin = '0,8,0,0' }
+    $stacked = $mode -eq 'Narrow'
+    $ui.TemperatureRow.Margin = if ($stacked) { '0,-1,0,0' } else { '0,2,0,0' }
+    for ($i = 1; $i -lt $ui.WeatherStats.Children.Count; $i++) {
+        $topGap = if ($stacked) { 1 } else { 3 }
+        $ui.WeatherStats.Children[$i].Margin = New-Object Windows.Thickness -ArgumentList 0, $topGap, 0, 0
+    }
+
+    $footerVisible = $mode -ne 'Clock'
+    if ($footerVisible) {
+        $ui.FooterRow.Visibility = 'Visible'
+        $ui.Card.Margin = New-Object Windows.Thickness -ArgumentList 0, 0, 0, $script:footerOutsideHeight
+    }
+    else {
+        $ui.FooterRow.Visibility = 'Collapsed'
+        $ui.Card.Margin = New-Object Windows.Thickness -ArgumentList 0
+    }
+    $ui.FooterRow.Margin = New-Object Windows.Thickness -ArgumentList 0
+    $bottomGripMargin = New-Object Windows.Thickness -ArgumentList 0, 0, 0, $(if ($footerVisible) { $script:footerOutsideHeight } else { 0 })
+    $ui.ResizeGripBottomLeft.Margin = $bottomGripMargin
+    $ui.ResizeGrip.Margin = $bottomGripMargin
     Update-FooterBacking
 
-    # The resize grip switches between wide and stacked; single blocks have
-    # one natural shape, so it is hidden there.
-    if ($script:config.Show -eq 'Both') { $ui.ResizeGrip.Visibility = 'Visible' }
-    else { $ui.ResizeGrip.Visibility = 'Collapsed' }
+    foreach ($grip in $script:resizeGrips) {
+        if ($null -ne $grip) { $grip.Visibility = 'Visible' }
+    }
 }
 
 # Natural wide-layout width: clock column + gaps + the widest weather line
@@ -1939,8 +2186,10 @@ function Get-StackedContentWidth {
     $ui.TemperatureText.Measure((New-Size $infinite $infinite))
     $ui.FeelsText.Measure((New-Size $infinite $infinite))
     $ui.WeatherStats.Measure((New-Size $infinite $infinite))
-    $left = [Math]::Max([double]$ui.TemperatureText.DesiredSize.Width, [double]$ui.FeelsText.DesiredSize.Width)
-    $needed = [Math]::Ceiling($left + [double]$ui.WeatherStats.DesiredSize.Width + 7 + 64 + 1)
+    $stats = [double]$ui.WeatherStats.DesiredSize.Width
+    $left = [Math]::Max([double]$ui.TemperatureText.DesiredSize.Width,
+        [double]$ui.FeelsText.DesiredSize.Width - $stats)
+    $needed = [Math]::Ceiling($left + $stats + 6 + 64 + 1)
 
     if ($script:layoutMode -ne 'Narrow' -and $script:layoutMode) { Set-WeatherSizing $script:layoutMode }
     return [Math]::Max([double]$script:stackedWidth, [double]$needed)
@@ -1958,25 +2207,27 @@ function Update-ControlReserve([string]$mode) {
 
 function Get-MinimumHeight([string]$mode, [double]$width) {
     $inner = $width - 2 * $script:padX
+    $footerHeight = 0.0
+    if ($mode -ne 'Clock') { $footerHeight = $script:footerOutsideHeight }
 
     if ($mode -eq 'Wide') {
         $weatherWidth = [Math]::Max(120.0, [double]($inner - $script:clockWidth - 29))
         $clock = Measure-Height $ui.ClockStack $script:clockWidth
         $weather = Measure-Height $ui.WeatherStack $weatherWidth
-        return 2 * $script:padY + [Math]::Max([double]$clock, [double]$weather) + 2.0
+        return 2 * $script:padY + [Math]::Max([double]$clock, [double]$weather) + 2.0 + $footerHeight
     }
 
     if ($mode -eq 'Clock') {
         return 2 * $script:padY + (Measure-Height $ui.ClockStack $script:clockBlockWidth) + 2
     }
     if ($mode -eq 'Weather') {
-        return 2 * $script:padY + (Measure-Height $ui.WeatherStack $script:weatherOnlyWidth) + 2
+        return 2 * $script:padY + (Measure-Height $ui.WeatherStack $script:weatherOnlyWidth) + 2 + $footerHeight
     }
 
     $inner = $script:stackedContentWidth   # stacked content width (normally the time's width)
     $clock = Measure-Height $ui.ClockStack $inner
     $weather = Measure-Height $ui.WeatherStack $inner
-    return 2 * $script:padY + $clock + 8 + 1 + 8 + $weather + 2
+    return 2 * $script:padY + $clock + 4 + 1 + 4 + $weather + 2 + $footerHeight
 }
 
 function Get-Scale {
@@ -2008,10 +2259,17 @@ function Get-WidgetRect {
 }
 
 # Width/height in DIPs. Height 0 means "as compact as the content allows".
-# -Anchored keeps the top-left corner fixed and stops at the monitor edge
-# (used while dragging the resize grip).
+# Corner resizing keeps the opposite corner fixed and stops at the monitor edge.
 function Set-WidgetSize {
-    param([double]$Width, [double]$Height, [switch]$Anchored)
+    param(
+        [double]$Width,
+        [double]$Height,
+        [string]$ResizeCorner,
+        [int]$AnchorX,
+        [int]$AnchorY,
+        [switch]$PreserveLayout,
+        [double]$ScaleOverride = [double]::NaN
+    )
 
     $maxWidth = [double]::PositiveInfinity
     $maxHeight = [double]::PositiveInfinity
@@ -2022,28 +2280,45 @@ function Set-WidgetSize {
         $left = $work.Left
         $top = $work.Top
 
-        if ($Anchored) {
-            $rect = Get-WidgetRect
-            if ($null -ne $rect) { $left = $rect.Left; $top = $rect.Top }
-        }
-
         if ($work.Right -gt $work.Left) {
-            $maxWidth = ($work.Right - $left) / $scale
-            $maxHeight = ($work.Bottom - $top) / $scale
+            if ($ResizeCorner) {
+                if ($ResizeCorner.EndsWith('Left')) { $maxWidth = ($AnchorX - $work.Left) / $scale }
+                else { $maxWidth = ($work.Right - $AnchorX) / $scale }
+                if ($ResizeCorner.StartsWith('Top')) { $maxHeight = ($AnchorY - $work.Top) / $scale }
+                else { $maxHeight = ($work.Bottom - $AnchorY) / $scale }
+            }
+            else {
+                $maxWidth = ($work.Right - $left) / $scale
+                $maxHeight = ($work.Bottom - $top) / $scale
+            }
         }
     }
 
-    # Both layouts have a content-defined width:
-    #   stacked -> ends where the time ends
-    #   wide    -> ends where the weather text (e.g. "Feels like 10 C") ends
-    # Dragging the grip switches layout at the midpoint between the two.
+    $requestedScale = [double]$script:config.Scale
+    if (-not [double]::IsNaN($ScaleOverride)) {
+        $requestedScale = [Math]::Max(0.5, [Math]::Min(3.0, [double]$ScaleOverride))
+        $script:config.Scale = $requestedScale
+    }
+
+    # Both layouts have a content-defined width. Resizing preserves the
+    # current layout; outside a resize, width still chooses wide or stacked.
     $narrowWidth = [double]$script:narrowMinWidth
     if ($script:config.Show -eq 'Both') {
         $script:stackedContentWidth = Get-StackedContentWidth
         $narrowWidth = 2 * $script:padX + $script:stackedContentWidth
     }
 
-    if ($script:config.Show -eq 'Clock') {
+    if ($PreserveLayout -and $script:layoutMode) {
+        $mode = $script:layoutMode
+        if ($mode -eq 'Narrow') { $w = $narrowWidth }
+        elseif ($mode -eq 'Wide') { $w = Get-WideWidth }
+        elseif ($mode -eq 'Clock') { $w = 2 * $script:padX + $script:clockBlockWidth }
+        else {
+            Set-WeatherSizing 'Weather'
+            $w = 2 * $script:padX + $script:weatherOnlyWidth
+        }
+    }
+    elseif ($script:config.Show -eq 'Clock') {
         $mode = 'Clock'
         $w = 2 * $script:padX + $script:clockBlockWidth
     }
@@ -2056,13 +2331,11 @@ function Set-WidgetSize {
         $wideWidth = Get-WideWidth
         $mode = 'Wide'
         $w = $wideWidth
-        if ([double]$Width -lt ($narrowWidth + $wideWidth) / 2) {
+        if ([double]$Width / $requestedScale -lt ($narrowWidth + $wideWidth) / 2) {
             $mode = 'Narrow'
             $w = $narrowWidth
         }
     }
-    $w = [Math]::Min($w, [Math]::Max(200.0, [double]$maxWidth))
-
     Update-Layout $mode
     Update-ControlReserve $mode
     Set-WeatherSizing $mode
@@ -2083,22 +2356,32 @@ function Set-WidgetSize {
         $ui.ContentGrid.HorizontalAlignment = 'Stretch'
     }
 
-    $minHeight = Get-MinimumHeight $mode $w
-
-    # Every shape fits its content exactly (the wide height comes from the
-    # clock block), so there is never empty space to resize away.
-    $Height = 0
-    $h = $Height
-    if ($h -le 0) { $h = $minHeight }
-    $minHeight = [double]$minHeight
-    $h = [Math]::Max($minHeight, [double]$h)
-    $h = [Math]::Min($h, [Math]::Max($minHeight, [double]$maxHeight))
+    $ui.FooterRow.Width = [double]$w
+    $minHeight = [double](Get-MinimumHeight $mode $w)
+    $maxScale = [Math]::Min([double]$maxWidth / $w, [double]$maxHeight / $minHeight)
+    $appliedScale = [Math]::Min($requestedScale, $maxScale)
+    if ([double]::IsInfinity($appliedScale) -or [double]::IsNaN($appliedScale)) {
+        $appliedScale = $requestedScale
+    }
+    $w *= $appliedScale
+    $h = $minHeight * $appliedScale
 
     if ([Math]::Abs($window.Width - $w) -gt 0.5) { $window.Width = $w }
     if ([Math]::Abs($window.Height - $h) -gt 0.5) { $window.Height = $h }
 
     if ($script:hwnd -ne [IntPtr]::Zero) {
-        [DesktopClockNative]::KeepInside($script:hwnd)
+        if ($ResizeCorner) {
+            $pixelWidth = [int][Math]::Round($w * $scale)
+            $pixelHeight = [int][Math]::Round($h * $scale)
+            if ($ResizeCorner.EndsWith('Left')) { $x = $AnchorX - $pixelWidth }
+            else { $x = $AnchorX }
+            if ($ResizeCorner.StartsWith('Top')) { $y = $AnchorY - $pixelHeight }
+            else { $y = $AnchorY }
+            [DesktopClockNative]::PlaceAt($script:hwnd, [int]$x, [int]$y, $pixelWidth, $pixelHeight)
+        }
+        else {
+            [DesktopClockNative]::KeepInside($script:hwnd)
+        }
     }
 }
 
@@ -2551,6 +2834,26 @@ function Start-ArtAnimations($canvas) {
                 $item.BeginAnimation([Windows.UIElement]::OpacityProperty,
                     (New-ArtAnimation 1 0.1 (1.2 + 0.7 * $i) $true 0))
             }
+            elseif ($kind -eq 'Rise') {
+                # Sunrise: the sun climbs out of the horizon, holds, fades out.
+                $item.RenderTransform.BeginAnimation([Windows.Media.TranslateTransform]::YProperty,
+                    (New-ArtKeyFrames @(0.0, 2.8, 0.30, 0.0, 0.78, 0.0, 1.0, 0.0) 6 0))
+                $item.BeginAnimation([Windows.UIElement]::OpacityProperty,
+                    (New-ArtKeyFrames @(0.0, 1.0, 0.78, 1.0, 0.95, 0.0, 1.0, 0.0) 6 0))
+            }
+            elseif ($kind -eq 'Set') {
+                # Sunset: the sun fades in up high, then sinks below the line.
+                $item.RenderTransform.BeginAnimation([Windows.Media.TranslateTransform]::YProperty,
+                    (New-ArtKeyFrames @(0.0, 0.0, 0.15, 0.0, 0.60, 2.8, 1.0, 2.8) 6 0))
+                $item.BeginAnimation([Windows.UIElement]::OpacityProperty,
+                    (New-ArtKeyFrames @(0.0, 0.0, 0.08, 1.0, 1.0, 1.0) 6 0))
+            }
+            elseif ($kind -eq 'Rays') {
+                # Rays fade in once the sun is up (rise) or out as it sinks (set).
+                $points = @(0.0, 0.0, 0.30, 0.0, 0.55, 1.0, 0.78, 1.0, 0.95, 0.0, 1.0, 0.0)
+                if ($parts -contains 'Set') { $points = @(0.0, 1.0, 0.15, 1.0, 0.50, 0.0, 1.0, 0.0) }
+                $item.BeginAnimation([Windows.UIElement]::OpacityProperty, (New-ArtKeyFrames $points 6 0))
+            }
             elseif ($kind -eq 'Drift') {
                 # Second cloud drifts the other way; small clouds drift less.
                 $move = $item.RenderTransform.Children[1]
@@ -2762,12 +3065,8 @@ function Update-FooterBacking {
             [Windows.Media.Color]::FromArgb(1, 0, 0, 0))
         $script:hitBrush.Freeze()
     }
-    if ($script:layoutMode -eq 'Wide' -and $null -ne $script:backingBrush) {
-        $ui.FooterRow.Background = $script:backingBrush
-    }
-    else {
-        $ui.FooterRow.Background = $script:hitBrush
-    }
+    $ui.FooterHotspot.Background = $script:hitBrush
+    $ui.FooterRow.Background = $null
 }
 
 function Get-Brush([string]$color) {
@@ -2800,19 +3099,27 @@ function Set-Appearance([switch]$Force) {
     foreach ($name in @(
         'DateText','WeekText','TimeText','LocationText','TempValue','FeelsText',
         'ConditionText','UpdatedText','RefreshButton','SettingsButton',
-        'CloseButton','ResizeGrip','WindText','HumidityText'
+        'CloseButton','ResizeGrip','ResizeGripTopLeft','ResizeGripTopRight',
+        'ResizeGripBottomLeft','WindText','HumidityText','TempHighText',
+        'TempLowText','SunriseText','SunsetText'
     )) {
         $ui[$name].Foreground = $foreground
     }
     $ui.WindPath.Stroke = $foreground
     $ui.HumidityPath.Stroke = $foreground
+    foreach ($name in @('SunriseHorizon','SunriseChevron','SunsetHorizon','SunsetChevron',
+                        'TempHighPath','TempLowPath')) {
+        $ui[$name].Stroke = $foreground
+    }
     $script:statsColor = $foreground.Color
     Update-StatsArt
 
     $ui.TempUnit.Foreground = $script:mutedBrush   # smaller, softer unit
+    $ui.TempHighText.Foreground = $script:mutedBrush
+    $ui.TempLowText.Foreground = $script:mutedBrush
     $ui.TimeSuffix.Foreground = $script:mutedBrush
 
-    # Patch behind temporary overlays (corner buttons, wide "Updated" line).
+    # Patch behind the corner buttons while shown.
     $backing = New-Object Windows.Media.SolidColorBrush -ArgumentList $bgColor
     $backing.Opacity = [Math]::Max(0.94, $opacity)
     $backing.Freeze()
@@ -2981,6 +3288,34 @@ function Format-Temperature($value) {
     return $text + (Get-TemperatureUnitText)
 }
 
+function Format-ShortTemperature([double]$value) {
+    $n = [int][Math]::Round((ConvertTo-ShownTemperature $value), [MidpointRounding]::AwayFromZero)
+    $text = [string][Math]::Abs($n)
+    if ($n -lt 0) { $text = $script:ch.Minus + $text }
+    return $text + $script:ch.Deg
+}
+
+function Update-TempRangeDisplay {
+    $highText = '--'
+    $lowText = '--'
+    if ($null -ne $script:dailyHigh) { $highText = Format-ShortTemperature ([double]$script:dailyHigh) }
+    if ($null -ne $script:dailyLow) { $lowText = Format-ShortTemperature ([double]$script:dailyLow) }
+    $ui.TempHighText.Text = $highText
+    $ui.TempLowText.Text = $lowText
+}
+
+function Format-CityTime([string]$value) {
+    if ([string]$value -match 'T(\d{2}:\d{2})') { return $matches[1] }
+    if ([string]$value -match '^(\d{2}:\d{2})') { return $matches[1] }
+    return '--:--'
+}
+
+function Update-DailyForecastDisplay {
+    Update-TempRangeDisplay
+    $ui.SunriseText.Text = Format-CityTime ([string]$script:sunrise)
+    $ui.SunsetText.Text = Format-CityTime ([string]$script:sunset)
+}
+
 # Large number with a smaller, softer unit: "12" + "deg C".
 function Set-TemperatureDisplay($value) {
     $script:lastTemp = $value
@@ -2988,6 +3323,7 @@ function Set-TemperatureDisplay($value) {
         $script:tempText = '--'
         $ui.TempValue.Text = '--'
         $ui.TempUnit.Text = ''
+        Update-TempRangeDisplay
         return
     }
     $n = [int][Math]::Round((ConvertTo-ShownTemperature ([double]$value)), [MidpointRounding]::AwayFromZero)
@@ -2996,6 +3332,7 @@ function Set-TemperatureDisplay($value) {
     $script:tempText = $text
     $ui.TempValue.Text = $text
     $ui.TempUnit.Text = Get-TemperatureUnitText
+    Update-TempRangeDisplay
 }
 
 function Show-FeelsLike($value) {
@@ -3114,10 +3451,39 @@ function Update-HumidityFill {
     $path.Fill = $brush
 }
 
+# Sunrise/sunset icons: the sun rises out of or sinks below the horizon in a
+# 6 s loop (tags Rise/Set/Rays, played by Start-ArtAnimations). With
+# animation off both show a full sun with rays, resting on the horizon.
+$script:sunArtAnimated = $false
+
+function Update-SunArt {
+    $on = [bool]$script:config.AnimateIcons
+    if ($on -eq $script:sunArtAnimated) { return }
+    $script:sunArtAnimated = $on
+
+    foreach ($art in @($ui.SunriseArt, $ui.SunsetArt)) {
+        if ($on) {
+            Start-ArtAnimations $art.Parent
+            continue
+        }
+        $art.RenderTransform.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, $null)
+        $art.RenderTransform.Y = 0
+        $art.BeginAnimation([Windows.UIElement]::OpacityProperty, $null)
+        $art.Opacity = 1
+        foreach ($child in @($art.Children)) {
+            if ([string]$child.Tag) {
+                $child.BeginAnimation([Windows.UIElement]::OpacityProperty, $null)
+                $child.Opacity = 1
+            }
+        }
+    }
+}
+
 function Update-StatsArt {
     try {
         Update-WindFlow
         Update-HumidityFill
+        Update-SunArt
     }
     catch {
         Write-Log "Wind/humidity icon update failed: $($_.Exception.Message)"
@@ -3170,18 +3536,42 @@ function Set-FeelsDisplay([string]$text) {
     $ui.FeelsText.Text = $text
 }
 
+# The "Updated ..." line and refresh button fade in while the pointer is
+# over the footer strip and fade out a moment after it leaves. They stay
+# visible while the user needs to see them (see Update-WeatherStatus).
 $script:footerHover = $false
 $script:footerForced = $true
-$script:footerVisible = $false
+$script:footerVisible = $true     # matches the XAML until the first check
+$script:footerFadeIn = New-Object Windows.Duration -ArgumentList ([TimeSpan]::FromMilliseconds(150))
+$script:footerFadeOut = New-Object Windows.Duration -ArgumentList ([TimeSpan]::FromMilliseconds(400))
+
+$script:footerHideTimer = New-Object Windows.Threading.DispatcherTimer
+$script:footerHideTimer.Interval = [TimeSpan]::FromMilliseconds(1500)
+$script:footerHideTimer.Add_Tick({
+    $script:footerHideTimer.Stop()
+    if (-not ($script:footerForced -or $script:footerHover -or $ui.FooterHotspot.IsMouseOver)) {
+        Set-FooterShown $false
+    }
+})
+
+function Set-FooterShown([bool]$shown) {
+    if ($script:footerVisible -eq $shown) { return }
+    $script:footerVisible = $shown
+    $target = 0.0
+    $duration = $script:footerFadeOut
+    if ($shown) { $target = 1.0; $duration = $script:footerFadeIn }
+    $animation = New-Object Windows.Media.Animation.DoubleAnimation -ArgumentList $target, $duration
+    $ui.FooterContent.BeginAnimation([Windows.UIElement]::OpacityProperty, $animation)
+}
 
 function Update-FooterVisibility {
-    $visible = $script:footerHover -or $script:footerForced
-    if ($visible -eq $script:footerVisible) { return }
-    $script:footerVisible = $visible
-    $target = 0.0
-    if ($visible) { $target = 1.0 }
-    $animation = New-Object Windows.Media.Animation.DoubleAnimation -ArgumentList $target, $script:fadeDuration
-    $ui.FooterRow.BeginAnimation([Windows.UIElement]::OpacityProperty, $animation)
+    if ($script:footerForced -or $script:footerHover) {
+        $script:footerHideTimer.Stop()
+        Set-FooterShown $true
+    }
+    elseif ($script:footerVisible -and -not $script:footerHideTimer.IsEnabled) {
+        $script:footerHideTimer.Start()
+    }
 }
 
 function Update-WeatherStatus {
@@ -3255,7 +3645,7 @@ function Set-WeatherTooltip {
     }
     $data = 'Open-Meteo'
     if ($script:shownSource -eq 'FMI') {
-        $data = 'Finnish Meteorological Institute (FMI) forecast for this location, CC BY 4.0'
+        $data = 'Current conditions from Finnish Meteorological Institute (FMI), CC BY 4.0; daily high/low and sun times from Open-Meteo.'
     }
     $lines += "Weather data: $data. Refreshes every 15 minutes."
     $ui.UpdatedText.ToolTip = $lines -join "`n"
@@ -3464,6 +3854,90 @@ function Get-WeatherCredit {
     return 'Weather by Open-Meteo'
 }
 
+function Set-DailyForecast($daily) {
+    $script:dailyHigh = $null
+    $script:dailyLow = $null
+    $script:sunrise = $null
+    $script:sunset = $null
+
+    if ($null -ne $daily) {
+        $high = @($daily.temperature_2m_max)
+        $low = @($daily.temperature_2m_min)
+        $sunrise = @($daily.sunrise)
+        $sunset = @($daily.sunset)
+        if ($high.Count -gt 0 -and $null -ne $high[0]) { $script:dailyHigh = [double]$high[0] }
+        if ($low.Count -gt 0 -and $null -ne $low[0]) { $script:dailyLow = [double]$low[0] }
+        if ($sunrise.Count -gt 0 -and $sunrise[0]) { $script:sunrise = [string]$sunrise[0] }
+        if ($sunset.Count -gt 0 -and $sunset[0]) { $script:sunset = [string]$sunset[0] }
+    }
+
+    Update-DailyForecastDisplay
+}
+
+function Get-OpenMeteoDailyUrl([string]$lat, [string]$lon) {
+    return 'https://api.open-meteo.com/v1/forecast' +
+        "?latitude=$lat&longitude=$lon" +
+        '&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset' +
+        '&temperature_unit=celsius&timezone=auto&forecast_days=1'
+}
+
+function Start-FmiDailyForecast($city, [string]$lat, [string]$lon) {
+    if ($null -ne $script:dailyTask) { return }
+    if ($script:dailyRetryCity -and
+        $script:dailyRetryCity.Latitude -eq $city.Latitude -and
+        $script:dailyRetryCity.Longitude -eq $city.Longitude -and
+        (Get-Date) -lt $script:dailyNextTry) { return }
+
+    try {
+        $script:dailyTaskCity = $city
+        $script:dailyTask = $script:http.GetStringAsync((Get-OpenMeteoDailyUrl $lat $lon))
+    }
+    catch {
+        $script:dailyTask = $null
+        $script:dailyTaskCity = $null
+        $script:dailyRetryCity = $city
+        $script:dailyNextTry = (Get-Date).AddMinutes(15)
+        Write-Log "Daily forecast request could not start: $(Get-ErrorText $_.Exception)"
+    }
+}
+
+function Complete-FmiDailyForecast {
+    if ($null -eq $script:dailyTask -or -not $script:dailyTask.IsCompleted) { return }
+
+    $task = $script:dailyTask
+    $city = $script:dailyTaskCity
+    $script:dailyTask = $null
+    $script:dailyTaskCity = $null
+    $sameCity = $null -ne $script:config.City -and $null -ne $city -and
+        $city.Latitude -eq $script:config.City.Latitude -and
+        $city.Longitude -eq $script:config.City.Longitude
+
+    if ($sameCity) {
+        try {
+            $response = ConvertFrom-Json -InputObject ($task.GetAwaiter().GetResult())
+            Set-DailyForecast $response.daily
+            $script:dailyRetryCity = $city
+            $script:dailyNextTry = (Get-Date).AddMinutes(15)
+            Update-SizeToContent
+        }
+        catch {
+            $script:dailyRetryCity = $city
+            $script:dailyNextTry = (Get-Date).AddMinutes(15)
+            Write-Log "Daily forecast request failed: $(Get-ErrorText $_.Exception)"
+        }
+    }
+    else {
+        $null = $task.Exception
+        $script:dailyRetryCity = $null
+        $script:dailyNextTry = [DateTime]::MinValue
+        if ($null -ne $script:config.City -and (Test-UseFmi $script:config.City)) {
+            $lat = ([double]$script:config.City.Latitude).ToString($script:invariant)
+            $lon = ([double]$script:config.City.Longitude).ToString($script:invariant)
+            Start-FmiDailyForecast $script:config.City $lat $lon
+        }
+    }
+}
+
 function Start-Weather {
     if ($null -eq $script:config.City) { return }
     if ($null -ne $script:weatherTask) { return }
@@ -3486,6 +3960,7 @@ function Start-Weather {
     if (Test-UseFmi $script:weatherCity) {
         $script:weatherSource = 'FMI'
         $url = Get-FmiUrl $lat $lon
+        Start-FmiDailyForecast $script:weatherCity $lat $lon
     }
     else {
         $script:weatherSource = 'Open-Meteo'
@@ -3493,6 +3968,7 @@ function Start-Weather {
             "?latitude=$lat&longitude=$lon" +
             '&current=temperature_2m,apparent_temperature,weather_code,is_day,' +
             'wind_speed_10m,relative_humidity_2m,rain,showers,snowfall' +
+            '&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset&forecast_days=1' +
             '&temperature_unit=celsius&wind_speed_unit=ms&timezone=auto'
     }
 
@@ -3529,7 +4005,9 @@ function Complete-Weather {
             $current = ConvertFrom-FmiForecast $json $script:weatherCity
         }
         else {
-            $current = (ConvertFrom-Json -InputObject $json).current
+            $response = ConvertFrom-Json -InputObject $json
+            $current = $response.current
+            Set-DailyForecast $response.daily
         }
 
         if ($null -eq $current -or $null -eq $current.temperature_2m -or
@@ -3636,6 +4114,7 @@ function Set-City($item) {
 
     Set-TemperatureDisplay $null
     Set-WindHumidityDisplay $null $null
+    Set-DailyForecast $null
     $ui.ConditionText.Text = 'Loading' + $script:ch.Ellipsis
     Set-FeelsDisplay ''
     Set-LocationDisplay
@@ -4638,11 +5117,11 @@ $ui.ControlHotspot.Add_MouseLeftButtonDown({
     $e.Handled = $true   # empty part of the control area never starts a drag
 })
 
-$ui.FooterRow.Add_MouseEnter({
+$ui.FooterHotspot.Add_MouseEnter({
     $script:footerHover = $true
     Update-FooterVisibility
 })
-$ui.FooterRow.Add_MouseLeave({
+$ui.FooterHotspot.Add_MouseLeave({
     $script:footerHover = $false
     Update-FooterVisibility
 })
@@ -4854,36 +5333,57 @@ function Complete-LayoutSwitch {
     Set-Appearance
 }
 
-$ui.ResizeGrip.Add_DragStarted({
+$resizeDragStarted = {
+    param($sender, $e)
     Save-Position   # remember where the current layout was
-    $script:resizeStartMode = $script:layoutMode
+    $script:resizeCorner = [string]$sender.Tag
+    $rect = Get-WidgetRect
+    if ($null -eq $rect) { return }
+    if ($script:resizeCorner.EndsWith('Left')) { $script:resizeAnchorX = $rect.Right }
+    else { $script:resizeAnchorX = $rect.Left }
+    if ($script:resizeCorner.StartsWith('Top')) { $script:resizeAnchorY = $rect.Bottom }
+    else { $script:resizeAnchorY = $rect.Top }
     $script:resizing = $true
     $script:resizeCursor = New-Object DesktopClockNative+POINT
     [void][DesktopClockNative]::GetCursorPos([ref]$script:resizeCursor)
     $script:resizeWidth = $window.Width
     $script:resizeHeight = $window.Height
-    $script:resizeScale = Get-Scale
-})
+    $script:resizeStartScale = [double]$script:config.Scale
+}
 
-$ui.ResizeGrip.Add_DragDelta({
+$resizeDragDelta = {
     $cursor = New-Object DesktopClockNative+POINT
     [void][DesktopClockNative]::GetCursorPos([ref]$cursor)
-    Set-WidgetSize -Anchored `
-        -Width ($script:resizeWidth + ($cursor.X - $script:resizeCursor.X) / $script:resizeScale) `
-        -Height ($script:resizeHeight + ($cursor.Y - $script:resizeCursor.Y) / $script:resizeScale)
-})
+    $deltaX = ($cursor.X - $script:resizeCursor.X) / (Get-Scale)
+    $deltaY = ($cursor.Y - $script:resizeCursor.Y) / (Get-Scale)
+    $denominator = [Math]::Pow($script:resizeWidth, 2) + [Math]::Pow($script:resizeHeight, 2)
+    if ($denominator -le 0) { return }
+    $directionX = 1.0
+    $directionY = 1.0
+    if ($script:resizeCorner.EndsWith('Left')) { $directionX = -1.0 }
+    if ($script:resizeCorner.StartsWith('Top')) { $directionY = -1.0 }
+    $factor = 1 + (($deltaX * $directionX * $script:resizeWidth +
+        $deltaY * $directionY * $script:resizeHeight) / $denominator)
+    $scale = $script:resizeStartScale * $factor
+    Set-WidgetSize -ResizeCorner $script:resizeCorner `
+        -AnchorX $script:resizeAnchorX -AnchorY $script:resizeAnchorY `
+        -PreserveLayout -ScaleOverride $scale `
+        -Width $window.Width -Height $window.Height
+}
 
-$ui.ResizeGrip.Add_DragCompleted({
+$resizeDragCompleted = {
     $script:resizing = $false
-    if ($script:layoutMode -ne $script:resizeStartMode) {
-        Complete-LayoutSwitch   # jump to the other layout's own spot
-    }
-    else {
-        Save-Position
-        Update-AutoTheme -AllowScreenSample
-        Set-Appearance
-    }
-})
+    Save-Position
+    Update-AutoTheme -AllowScreenSample
+    Set-Appearance
+}
+
+foreach ($grip in $script:resizeGrips) {
+    if ($null -eq $grip) { continue }
+    $grip.Add_DragStarted($resizeDragStarted)
+    $grip.Add_DragDelta($resizeDragDelta)
+    $grip.Add_DragCompleted($resizeDragCompleted)
+}
 
 # ============================================================
 # Start-up, timers, shutdown
@@ -5014,6 +5514,7 @@ $timer.Add_Tick({
             Invoke-SecondTick $now
         }
         Complete-Weather
+        Complete-FmiDailyForecast
         Complete-UpdateCheck
         Complete-UpdateDownload
         Invoke-SystemFlags $now
@@ -5075,7 +5576,7 @@ finally {
         try { Remove-Item -LiteralPath $script:settingsFolder -Recurse -Force -ErrorAction Stop }
         catch {
             [void](Show-AppDialog -Kind Warning -Title 'Uninstall not fully completed' `
-                -Message 'The widget was closed, but some of its files could not be removed.' `
+                -Message 'The widget was closed, but some $script:AppVersion = [version]'1.1.0'$script:AppVersion = [version]'1.1.0'of its files could not be removed.' `
                 -Note "$($script:settingsFolder)`n$($_.Exception.Message)")
         }
     }
